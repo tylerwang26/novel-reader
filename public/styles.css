@@ -381,6 +381,11 @@ button {
   border: 0;
 }
 
+/* Ensure [hidden] wins over display:flex panels */
+[hidden] {
+  display: none !important;
+}
+
 @keyframes rise {
   from {
     opacity: 0;

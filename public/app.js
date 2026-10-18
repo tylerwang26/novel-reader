@@ -71,14 +71,15 @@ function chineseToNumber(raw) {
   // handle 十X / X十 / X十Y / 百
   if (s.includes("百")) {
     const [a, b] = s.split("百");
-    n += (digits[a] ?? 1) * 100;
+    n += ((digits[a] != null ? digits[a] : 1)) * 100;
     if (b) n += chineseToNumber(b);
     return n;
   }
   if (s.includes("十")) {
     const [a, b] = s.split("十");
-    n += (a === "" ? 1 : digits[a] ?? Number(a) || 0) * 10;
-    if (b) n += digits[b] ?? Number(b) || 0;
+    const tens = a === "" ? 1 : (digits[a] != null ? digits[a] : Number(a) || 0);
+    n += tens * 10;
+    if (b) n += digits[b] != null ? digits[b] : Number(b) || 0;
     return n;
   }
   if (s.length === 1 && digits[s] != null) return digits[s];
