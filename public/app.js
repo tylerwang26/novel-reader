@@ -1,6 +1,9 @@
 const DEFAULT_TOC =
   "https://big5.quanben5.com/amp/n/fanrenxiuxianchuan/xiaoshuo.html";
 
+const STORAGE_KEY = "mosheng.library.v1";
+const MAX_BOOKS = 24;
+
 const state = {
   book: null,
   chapterIndex: 0,
@@ -13,6 +16,7 @@ const state = {
   voice: null,
   recognition: null,
   listening: false,
+  suppressResumePrompt: false,
 };
 
 const el = {
@@ -23,6 +27,7 @@ const el = {
   reader: document.getElementById("reader"),
   bookTitle: document.getElementById("book-title"),
   chapterTitle: document.getElementById("chapter-title"),
+  progressLine: document.getElementById("progress-line"),
   content: document.getElementById("content"),
   list: document.getElementById("chapter-list"),
   drawer: document.getElementById("drawer"),
@@ -34,6 +39,10 @@ const el = {
   searchRead: document.getElementById("search-read"),
   cmdForm: document.getElementById("cmd-form"),
   cmdInput: document.getElementById("cmd-input"),
+  libraryList: document.getElementById("library-list"),
+  libraryEmpty: document.getElementById("library-empty"),
+  continueBanner: document.getElementById("continue-banner"),
+  resumeBanner: document.getElementById("resume-banner"),
 };
 
 function setStatus(msg) {
@@ -46,6 +55,258 @@ async function api(path) {
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   return data;
 }
+
+/* ---------------- memory (localStorage) ---------------- */
+
+function loadStore() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return { books: [], lastSourceUrl: "" };
+    const data = JSON.parse(raw);
+    if (!data || !Array.isArray(data.books)) return { books: [], lastSourceUrl: "" };
+    return data;
+  } catch {
+    return { books: [], lastSourceUrl: "" };
+  }
+}
+
+function saveStore(store) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
+  } catch (err) {
+    console.warn("localStorage save failed", err);
+  }
+}
+
+function bookKey(sourceUrl) {
+  try {
+    const u = new URL(sourceUrl);
+    u.hash = "";
+    return u.href;
+  } catch {
+    return String(sourceUrl || "").trim();
+  }
+}
+
+function getBooks() {
+  return loadStore().books.slice().sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+}
+
+function getBookRecord(sourceUrl) {
+  const key = bookKey(sourceUrl);
+  return getBooks().find((b) => bookKey(b.sourceUrl) === key) || null;
+}
+
+function upsertBook( partial ) {
+  const store = loadStore();
+  const key = bookKey(partial.sourceUrl);
+  if (!key) return null;
+  const idx = store.books.findIndex((b) => bookKey(b.sourceUrl) === key);
+  const prev = idx >= 0 ? store.books[idx] : {};
+  const next = {
+    ...prev,
+    ...partial,
+    sourceUrl: key,
+    title: partial.title || prev.title || "未命名小說",
+    author: partial.author != null ? partial.author : prev.author || "",
+    updatedAt: Date.now(),
+    progress: {
+      ...(prev.progress || {}),
+      ...(partial.progress || {}),
+    },
+  };
+  if (!next.progress.chapterTitle && next.progress.chapterIndex == null) {
+    // keep empty progress object only if we intentionally set fields
+  }
+  if (idx >= 0) store.books[idx] = next;
+  else store.books.unshift(next);
+  store.books.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  store.books = store.books.slice(0, MAX_BOOKS);
+  store.lastSourceUrl = key;
+  saveStore(store);
+  return next;
+}
+
+function removeBook(sourceUrl) {
+  const store = loadStore();
+  const key = bookKey(sourceUrl);
+  store.books = store.books.filter((b) => bookKey(b.sourceUrl) !== key);
+  if (store.lastSourceUrl === key) {
+    store.lastSourceUrl = store.books[0] ? store.books[0].sourceUrl : "";
+  }
+  saveStore(store);
+}
+
+function saveProgress(extra = {}) {
+  if (!state.book?.sourceUrl) return;
+  const ch = state.book.chapters?.[state.chapterIndex];
+  const chapterTitle =
+    (state.chapter && state.chapter.title) || (ch && ch.title) || "";
+  upsertBook({
+    sourceUrl: state.book.sourceUrl,
+    title: state.book.title,
+    author: state.book.author || "",
+    chapterCount: state.book.chapterCount,
+    progress: {
+      chapterIndex: state.chapterIndex,
+      chapterTitle,
+      chapterUrl: (state.chapter && state.chapter.url) || (ch && ch.url) || "",
+      paragraphIndex: state.speakFrom || 0,
+      rate: state.rate,
+      ...extra,
+    },
+  });
+  updateProgressLine();
+  renderLibrary();
+}
+
+function formatProgress(rec) {
+  if (!rec || !rec.progress) return "尚未開始朗讀";
+  const p = rec.progress;
+  const chap = p.chapterTitle || (p.chapterIndex != null ? `第 ${p.chapterIndex + 1} 章` : "未知章節");
+  const para =
+    p.paragraphIndex != null && p.paragraphIndex > 0
+      ? ` · 第 ${p.paragraphIndex + 1} 段`
+      : "";
+  return `${chap}${para}`;
+}
+
+function updateProgressLine() {
+  if (!el.progressLine) return;
+  if (!state.book) {
+    el.progressLine.textContent = "";
+    return;
+  }
+  const rec = getBookRecord(state.book.sourceUrl);
+  el.progressLine.textContent = rec
+    ? `進度：${formatProgress(rec)}（已記住）`
+    : "進度：尚未儲存";
+}
+
+function renderLibrary() {
+  const books = getBooks();
+  if (!el.libraryList) return;
+  el.libraryList.innerHTML = "";
+  el.libraryEmpty.hidden = books.length > 0;
+
+  // home continue banner: most recently updated with progress
+  const withProgress = books.find(
+    (b) => b.progress && (b.progress.chapterIndex != null || b.progress.chapterUrl),
+  );
+  if (withProgress && el.continueBanner) {
+    el.continueBanner.hidden = false;
+    el.continueBanner.innerHTML = "";
+    const p = document.createElement("p");
+    p.innerHTML = `<strong>從上次繼續</strong> · ${escapeHtml(withProgress.title)} · ${escapeHtml(formatProgress(withProgress))}`;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "primary";
+    btn.textContent = "繼續閱讀";
+    btn.addEventListener("click", () =>
+      openBook(withProgress.sourceUrl, { resume: true, autoplay: false }),
+    );
+    const btnSpeak = document.createElement("button");
+    btnSpeak.type = "button";
+    btnSpeak.className = "ghost";
+    btnSpeak.textContent = "繼續唸";
+    btnSpeak.addEventListener("click", () =>
+      openBook(withProgress.sourceUrl, { resume: true, autoplay: true }),
+    );
+    el.continueBanner.append(p, btn, btnSpeak);
+  } else if (el.continueBanner) {
+    el.continueBanner.hidden = true;
+    el.continueBanner.innerHTML = "";
+  }
+
+  books.forEach((rec) => {
+    const li = document.createElement("li");
+    li.className = "library-item";
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    const title = document.createElement("p");
+    title.className = "title";
+    title.textContent = rec.title || "未命名小說";
+    const sub = document.createElement("p");
+    sub.className = "sub";
+    sub.textContent = `${rec.author ? rec.author + " · " : ""}${formatProgress(rec)}`;
+    sub.title = rec.sourceUrl;
+    meta.append(title, sub);
+
+    const actions = document.createElement("div");
+    actions.className = "actions";
+    const openBtn = document.createElement("button");
+    openBtn.type = "button";
+    openBtn.className = "primary";
+    openBtn.textContent = "開啟";
+    openBtn.addEventListener("click", () =>
+      openBook(rec.sourceUrl, { resume: true, autoplay: false }),
+    );
+    const contBtn = document.createElement("button");
+    contBtn.type = "button";
+    contBtn.className = "ghost";
+    contBtn.textContent = "繼續唸";
+    contBtn.addEventListener("click", () =>
+      openBook(rec.sourceUrl, { resume: true, autoplay: true }),
+    );
+    const delBtn = document.createElement("button");
+    delBtn.type = "button";
+    delBtn.className = "ghost danger";
+    delBtn.textContent = "刪除";
+    delBtn.addEventListener("click", () => {
+      if (confirm(`刪除「${rec.title}」的網站與進度紀錄？`)) {
+        removeBook(rec.sourceUrl);
+        renderLibrary();
+        setStatus("已刪除紀錄");
+      }
+    });
+    actions.append(openBtn, contBtn, delBtn);
+    li.append(meta, actions);
+    el.libraryList.appendChild(li);
+  });
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function showResumeBanner(rec) {
+  if (!el.resumeBanner || !rec?.progress) {
+    if (el.resumeBanner) {
+      el.resumeBanner.hidden = true;
+      el.resumeBanner.innerHTML = "";
+    }
+    return;
+  }
+  const p = rec.progress;
+  const sameChapter = p.chapterIndex === state.chapterIndex;
+  const para = p.paragraphIndex || 0;
+  if (sameChapter && para <= 0 && !state.suppressResumePrompt) {
+    // still show once when just opened
+  }
+  el.resumeBanner.hidden = false;
+  el.resumeBanner.innerHTML = "";
+  const text = document.createElement("p");
+  text.innerHTML = `<strong>上次進度</strong> · ${escapeHtml(formatProgress(rec))}`;
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "primary";
+  btn.textContent = "從上次繼續唸";
+  btn.addEventListener("click", () => resumeFromSaved({ autoplay: true }));
+  const dismiss = document.createElement("button");
+  dismiss.type = "button";
+  dismiss.className = "ghost";
+  dismiss.textContent = "稍後";
+  dismiss.addEventListener("click", () => {
+    el.resumeBanner.hidden = true;
+  });
+  el.resumeBanner.append(text, btn, dismiss);
+}
+
+/* ---------------- TTS / chapters ---------------- */
 
 function chineseToNumber(raw) {
   const s = String(raw).trim();
@@ -67,17 +328,15 @@ function chineseToNumber(raw) {
   if (s === "十") return 10;
   if (s === "百") return 100;
   let n = 0;
-  let unit = 1;
-  // handle 十X / X十 / X十Y / 百
   if (s.includes("百")) {
     const [a, b] = s.split("百");
-    n += ((digits[a] != null ? digits[a] : 1)) * 100;
+    n += (digits[a] != null ? digits[a] : 1) * 100;
     if (b) n += chineseToNumber(b);
     return n;
   }
   if (s.includes("十")) {
     const [a, b] = s.split("十");
-    const tens = a === "" ? 1 : (digits[a] != null ? digits[a] : Number(a) || 0);
+    const tens = a === "" ? 1 : digits[a] != null ? digits[a] : Number(a) || 0;
     n += tens * 10;
     if (b) n += digits[b] != null ? digits[b] : Number(b) || 0;
     return n;
@@ -121,7 +380,9 @@ function stopSpeech() {
 }
 
 function clearSpeakingClass() {
-  el.content.querySelectorAll("p.speaking").forEach((p) => p.classList.remove("speaking"));
+  el.content
+    .querySelectorAll("p.speaking")
+    .forEach((p) => p.classList.remove("speaking"));
 }
 
 function speakFrom(index = 0) {
@@ -134,6 +395,7 @@ function speakFrom(index = 0) {
   state.speaking = true;
   state.paused = false;
   pickZhTwFemaleVoice();
+  saveProgress();
   speakNext();
 }
 
@@ -141,11 +403,11 @@ function speakNext() {
   if (!state.speaking || state.paused) return;
   if (state.speakFrom >= state.paragraphs.length) {
     state.speaking = false;
+    saveProgress({ paragraphIndex: 0 });
     setStatus("本章朗讀完畢");
-    // auto next chapter
     if (state.chapterIndex < (state.book?.chapters.length || 0) - 1) {
       setStatus("本章朗讀完畢，載入下一章…");
-      loadChapter(state.chapterIndex + 1, { autoplay: true });
+      loadChapter(state.chapterIndex + 1, { autoplay: true, paragraphIndex: 0 });
     }
     return;
   }
@@ -161,12 +423,16 @@ function speakNext() {
     node.classList.add("speaking");
     node.scrollIntoView({ behavior: "smooth", block: "center" });
   }
+  // persist as we start each paragraph
+  saveProgress({ paragraphIndex: i });
   u.onend = () => {
     state.speakFrom = i + 1;
+    saveProgress({ paragraphIndex: state.speakFrom });
     speakNext();
   };
   u.onerror = () => {
     state.speakFrom = i + 1;
+    saveProgress({ paragraphIndex: state.speakFrom });
     speakNext();
   };
   speechSynthesis.speak(u);
@@ -176,7 +442,8 @@ function pauseSpeech() {
   if (!state.speaking) return;
   speechSynthesis.pause();
   state.paused = true;
-  setStatus("已暫停");
+  saveProgress();
+  setStatus("已暫停（進度已記住）");
 }
 
 function resumeSpeech() {
@@ -189,17 +456,56 @@ function resumeSpeech() {
   setStatus("繼續朗讀");
 }
 
-async function loadToc(url) {
+async function openBook(url, { resume = true, autoplay = false } = {}) {
+  el.tocUrl.value = url;
+  await loadToc(url, { resume, autoplay });
+}
+
+async function loadToc(url, { resume = true, autoplay = false } = {}) {
   setStatus("正在載入目錄…");
-  const data = await api(`/api/toc?url=${encodeURIComponent(url)}`);
+  let data;
+  try {
+    data = await api(`/api/toc?url=${encodeURIComponent(url)}`);
+  } catch (err) {
+    setStatus(`載入失敗：${err.message || err}`);
+    throw err;
+  }
   state.book = data;
   el.bookTitle.textContent = `${data.title}${data.author ? " · " + data.author : ""}`;
+  upsertBook({
+    sourceUrl: data.sourceUrl || url,
+    title: data.title,
+    author: data.author || "",
+    chapterCount: data.chapterCount,
+  });
   renderChapterList();
+  renderLibrary();
   el.setup.hidden = true;
   el.reader.hidden = false;
   setStatus(`已載入 ${data.chapterCount} 章`);
+
+  const rec = getBookRecord(data.sourceUrl || url);
+  let startIndex = 0;
+  let paragraphIndex = 0;
+  if (resume && rec?.progress && rec.progress.chapterIndex != null) {
+    startIndex = Math.min(
+      Math.max(0, rec.progress.chapterIndex),
+      Math.max(0, data.chapters.length - 1),
+    );
+    paragraphIndex = Math.max(0, rec.progress.paragraphIndex || 0);
+    if (rec.progress.rate) {
+      state.rate = Number(rec.progress.rate) || state.rate;
+      el.rate.value = String(state.rate);
+      el.rateLabel.textContent = `${state.rate.toFixed(1)}×`;
+    }
+  }
+
   if (data.chapters.length) {
-    await loadChapter(0);
+    await loadChapter(startIndex, {
+      autoplay,
+      paragraphIndex: resume ? paragraphIndex : 0,
+      showResumePrompt: resume && !autoplay,
+    });
   }
 }
 
@@ -213,14 +519,17 @@ function renderChapterList() {
     btn.className = i === state.chapterIndex ? "active" : "";
     btn.addEventListener("click", () => {
       closeDrawer();
-      loadChapter(i);
+      loadChapter(i, { autoplay: false, paragraphIndex: 0 });
     });
     li.appendChild(btn);
     el.list.appendChild(li);
   });
 }
 
-async function loadChapter(index, { autoplay = false } = {}) {
+async function loadChapter(
+  index,
+  { autoplay = false, paragraphIndex = 0, showResumePrompt = false } = {},
+) {
   const ch = state.book?.chapters?.[index];
   if (!ch) return;
   stopSpeech();
@@ -229,7 +538,8 @@ async function loadChapter(index, { autoplay = false } = {}) {
   state.chapterIndex = index;
   state.chapter = data;
   state.paragraphs = data.paragraphs || [];
-  state.speakFrom = 0;
+  const maxPara = Math.max(0, state.paragraphs.length - 1);
+  state.speakFrom = Math.min(Math.max(0, paragraphIndex), maxPara);
   el.chapterTitle.textContent = data.title || ch.title;
   el.content.innerHTML = "";
   state.paragraphs.forEach((p) => {
@@ -238,8 +548,70 @@ async function loadChapter(index, { autoplay = false } = {}) {
     el.content.appendChild(node);
   });
   renderChapterList();
+  saveProgress({
+    chapterIndex: index,
+    chapterTitle: data.title || ch.title,
+    chapterUrl: data.url || ch.url,
+    paragraphIndex: state.speakFrom,
+  });
   setStatus(`已就緒：${data.title || ch.title}`);
-  if (autoplay) speakFrom(0);
+
+  const rec = getBookRecord(state.book.sourceUrl);
+  if (showResumePrompt && rec?.progress) {
+    showResumeBanner(rec);
+  } else if (el.resumeBanner) {
+    el.resumeBanner.hidden = true;
+  }
+
+  if (autoplay) {
+    speakFrom(state.speakFrom);
+  } else if (state.speakFrom > 0) {
+    const node = el.content.children[state.speakFrom];
+    if (node) node.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+}
+
+async function resumeFromSaved({ autoplay = true } = {}) {
+  if (!state.book) {
+    const books = getBooks();
+    const rec = books.find(
+      (b) => b.progress && b.progress.chapterIndex != null,
+    );
+    if (!rec) {
+      setStatus("沒有可繼續的進度");
+      return;
+    }
+    await openBook(rec.sourceUrl, { resume: true, autoplay });
+    return;
+  }
+  const rec = getBookRecord(state.book.sourceUrl);
+  if (!rec?.progress) {
+    setStatus("這本書還沒有進度，從頭朗讀");
+    speakFrom(0);
+    return;
+  }
+  const p = rec.progress;
+  const idx =
+    p.chapterIndex != null
+      ? p.chapterIndex
+      : state.book.chapters.findIndex((c) => c.url === p.chapterUrl);
+  if (idx < 0) {
+    setStatus("找不到上次章節，從頭朗讀");
+    speakFrom(0);
+    return;
+  }
+  if (idx !== state.chapterIndex) {
+    await loadChapter(idx, {
+      autoplay,
+      paragraphIndex: p.paragraphIndex || 0,
+    });
+  } else if (autoplay) {
+    speakFrom(p.paragraphIndex || 0);
+  } else {
+    state.speakFrom = p.paragraphIndex || 0;
+    setStatus(`已定位到上次進度：${formatProgress(rec)}`);
+  }
+  if (el.resumeBanner) el.resumeBanner.hidden = true;
 }
 
 function openDrawer() {
@@ -252,8 +624,15 @@ function closeDrawer() {
   el.backdrop.hidden = true;
 }
 
+function goHome() {
+  stopSpeech();
+  el.reader.hidden = true;
+  el.setup.hidden = false;
+  renderLibrary();
+  setStatus("已回到書單。可繼續閱讀或載入新目錄。");
+}
+
 function findChapterByNumber(n) {
-  // 1-based human chapter number vs list index
   if (!state.book) return -1;
   const byTitle = state.book.chapters.findIndex((c) => {
     const m = c.title.match(/第([零〇一二兩三四五六七八九十百千\d]+)章/);
@@ -281,7 +660,7 @@ function runCommand(raw) {
       setStatus(`找不到第 ${m[1]} 章`);
       return;
     }
-    loadChapter(idx, { autoplay: true });
+    loadChapter(idx, { autoplay: true, paragraphIndex: 0 });
     return;
   }
 
@@ -289,17 +668,24 @@ function runCommand(raw) {
     pauseSpeech();
     return;
   }
+  // 「繼續唸／繼續朗讀／從上次繼續」優先接進度；單純「繼續」若正在播則 resume
+  if (/繼續唸|繼續念|繼續朗讀|從上次繼續|接著唸|接著念/.test(text)) {
+    resumeFromSaved({ autoplay: true });
+    return;
+  }
   if (/繼續|恢復|接著/.test(text)) {
-    resumeSpeech();
+    if (state.speaking || state.paused) resumeSpeech();
+    else resumeFromSaved({ autoplay: true });
     return;
   }
   if (/下一章/.test(text)) {
-    loadChapter(state.chapterIndex + 1, { autoplay: state.speaking || true });
+    loadChapter(state.chapterIndex + 1, { autoplay: true, paragraphIndex: 0 });
     return;
   }
   if (/上一章/.test(text)) {
     loadChapter(Math.max(0, state.chapterIndex - 1), {
-      autoplay: state.speaking || true,
+      autoplay: true,
+      paragraphIndex: 0,
     });
     return;
   }
@@ -309,7 +695,8 @@ function runCommand(raw) {
   }
   if (/停止|關掉語音/.test(text)) {
     stopSpeech();
-    setStatus("已停止朗讀");
+    saveProgress();
+    setStatus("已停止朗讀（進度已記住）");
     return;
   }
   if (/速度\s*([0-9.]+)/.test(text)) {
@@ -318,19 +705,19 @@ function runCommand(raw) {
       state.rate = r;
       el.rate.value = String(r);
       el.rateLabel.textContent = `${r.toFixed(1)}×`;
+      saveProgress({ rate: r });
       setStatus(`速度設為 ${r}×`);
     }
     return;
   }
 
-  // search fallback inside command
   if (/搜尋|找/.test(text)) {
     const q = text.replace(/.*(?:搜尋|找)\s*/, "").trim();
     if (q) jumpToSearch(q, true);
     return;
   }
 
-  setStatus(`無法辨識指令：「${text}」。可試「從第 3 章開始唸」`);
+  setStatus(`無法辨識指令：「${text}」。可試「繼續唸」或「從第 3 章開始唸」`);
 }
 
 function jumpToSearch(q, thenRead) {
@@ -347,6 +734,8 @@ function jumpToSearch(q, thenRead) {
     node.classList.add("hit");
     node.scrollIntoView({ behavior: "smooth", block: "center" });
   }
+  state.speakFrom = idx;
+  saveProgress({ paragraphIndex: idx });
   setStatus(`已跳到第 ${idx + 1} 段`);
   if (thenRead) speakFrom(idx);
 }
@@ -390,7 +779,7 @@ function setupRecognition() {
       rec.start();
       state.listening = true;
       btn.classList.add("primary");
-      setStatus("正在聽…請說「從第 N 章開始唸」");
+      setStatus("正在聽…可說「繼續唸」或「從第 N 章開始唸」");
     } catch {
       setStatus("無法啟動麥克風，請改用文字指令");
     }
@@ -401,7 +790,10 @@ function bindUi() {
   el.tocForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     try {
-      await loadToc(el.tocUrl.value.trim() || DEFAULT_TOC);
+      await loadToc(el.tocUrl.value.trim() || DEFAULT_TOC, {
+        resume: true,
+        autoplay: false,
+      });
     } catch (err) {
       setStatus(String(err.message || err));
     }
@@ -410,6 +802,11 @@ function bindUi() {
   document.getElementById("btn-chapters").addEventListener("click", openDrawer);
   document.getElementById("btn-close-drawer").addEventListener("click", closeDrawer);
   el.backdrop.addEventListener("click", closeDrawer);
+
+  document.getElementById("btn-home").addEventListener("click", goHome);
+  document.getElementById("btn-resume").addEventListener("click", () =>
+    resumeFromSaved({ autoplay: true }),
+  );
 
   document.getElementById("btn-play").addEventListener("click", () => {
     if (state.paused) resumeSpeech();
@@ -420,15 +817,22 @@ function bindUi() {
     else pauseSpeech();
   });
   document.getElementById("btn-prev").addEventListener("click", () => {
-    loadChapter(Math.max(0, state.chapterIndex - 1));
+    loadChapter(Math.max(0, state.chapterIndex - 1), {
+      autoplay: false,
+      paragraphIndex: 0,
+    });
   });
   document.getElementById("btn-next").addEventListener("click", () => {
-    loadChapter(Math.min((state.book?.chapters.length || 1) - 1, state.chapterIndex + 1));
+    loadChapter(
+      Math.min((state.book?.chapters.length || 1) - 1, state.chapterIndex + 1),
+      { autoplay: false, paragraphIndex: 0 },
+    );
   });
 
   el.rate.addEventListener("input", () => {
     state.rate = Number(el.rate.value);
     el.rateLabel.textContent = `${state.rate.toFixed(1)}×`;
+    saveProgress({ rate: state.rate });
   });
 
   el.searchForm.addEventListener("submit", (e) => {
@@ -440,9 +844,23 @@ function bindUi() {
     e.preventDefault();
     runCommand(el.cmdInput.value);
   });
+
+  window.addEventListener("beforeunload", () => {
+    if (state.book) saveProgress();
+  });
 }
 
 ensureVoices();
 bindUi();
 setupRecognition();
-setStatus("就緒。載入目錄後即可朗讀《凡人修仙傳》。");
+renderLibrary();
+
+const store = loadStore();
+if (store.lastSourceUrl) {
+  el.tocUrl.value = store.lastSourceUrl;
+}
+setStatus(
+  getBooks().length
+    ? "就緒。可從「最近書單」繼續，或載入新目錄。"
+    : "就緒。載入目錄後即可朗讀；網站與進度會自動記住。",
+);

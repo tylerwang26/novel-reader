@@ -54,12 +54,28 @@
           <button type="submit" class="primary">載入目錄</button>
         </form>
         <p id="status" class="status" role="status"></p>
+
+        <section class="library" id="library" aria-label="最近閱讀">
+          <div class="library-head">
+            <h2>最近書單</h2>
+            <p class="library-hint">記住網站與進度（本機瀏覽器）</p>
+          </div>
+          <div id="continue-banner" class="continue-banner" hidden></div>
+          <ul id="library-list" class="library-list"></ul>
+          <p id="library-empty" class="library-empty" hidden>尚無紀錄。載入目錄後會自動記住。</p>
+        </section>
       </section>
 
       <section class="reader" id="reader" hidden>
+        <div id="resume-banner" class="resume-banner" hidden></div>
         <div class="reader-meta">
           <p class="book-title" id="book-title"></p>
           <p class="chapter-title" id="chapter-title"></p>
+          <p class="progress-line" id="progress-line"></p>
+        </div>
+        <div class="reader-toolbar">
+          <button type="button" id="btn-home" class="ghost">書單</button>
+          <button type="button" id="btn-resume" class="ghost">從上次繼續</button>
         </div>
 
         <div class="transport" aria-label="朗讀控制">
@@ -96,7 +112,7 @@
           <input
             id="cmd-input"
             type="text"
-            placeholder="文字指令：從第 10 章開始唸／暫停／繼續／下一章"
+            placeholder="文字指令：繼續唸／從第 10 章開始唸／暫停／下一章"
             autocomplete="off"
           />
           <button type="submit" class="ghost">執行</button>
