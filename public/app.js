@@ -52,8 +52,12 @@ const el = {
   btnToggle: document.getElementById("btn-toggle"),
   micHint: document.getElementById("mic-hint"),
   ttsEngine: document.getElementById("tts-engine"),
+  ttsQuality: document.getElementById("tts-quality"),
+  googleKey: document.getElementById("google-key"),
+  googleVoice: document.getElementById("google-voice"),
   openaiKey: document.getElementById("openai-key"),
   openaiVoice: document.getElementById("openai-voice"),
+  readerId: document.getElementById("reader-id"),
   syncCode: document.getElementById("sync-code"),
   unlockAudio: document.getElementById("unlock-audio"),
   ttsAudio: document.getElementById("tts-audio"),
@@ -84,17 +88,36 @@ async function api(path, opts = {}) {
 
 /* ---------------- settings ---------------- */
 
+function randomReaderId(n = 12) {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const bytes = new Uint8Array(n);
+  crypto.getRandomValues(bytes);
+  let s = "";
+  for (let i = 0; i < n; i++) s += alphabet[bytes[i] % alphabet.length];
+  return s;
+}
+
+function defaultSettings() {
+  return {
+    ttsEngine: "auto",
+    ttsQuality: "google-wavenet",
+    googleKey: "",
+    googleVoice: "cmn-TW-Wavenet-A",
+    openaiKey: "",
+    openaiVoice: "nova",
+    readerId: "",
+    syncCode: "",
+  };
+}
+
 function loadSettings() {
   try {
     return {
-      ttsEngine: "auto",
-      openaiKey: "",
-      openaiVoice: "nova",
-      syncCode: "",
+      ...defaultSettings(),
       ...(JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}") || {}),
     };
   } catch {
-    return { ttsEngine: "auto", openaiKey: "", openaiVoice: "nova", syncCode: "" };
+    return defaultSettings();
   }
 }
 
@@ -104,12 +127,26 @@ function saveSettings(patch) {
   return next;
 }
 
+/** Ensure stable reader ID exists (first visit auto-create). */
+function ensureReaderId() {
+  const s = loadSettings();
+  if (s.readerId && /^[A-Z0-9]{8,20}$/.test(s.readerId)) return s.readerId;
+  const id = randomReaderId(12);
+  saveSettings({ readerId: id, syncCode: s.syncCode || id.slice(0, 8) });
+  return id;
+}
+
 function fillSettingsForm() {
   const s = loadSettings();
-  el.ttsEngine.value = s.ttsEngine || "auto";
-  el.openaiKey.value = s.openaiKey || "";
-  el.openaiVoice.value = s.openaiVoice || "nova";
-  el.syncCode.value = s.syncCode || "";
+  const readerId = ensureReaderId();
+  if (el.ttsEngine) el.ttsEngine.value = s.ttsEngine || "auto";
+  if (el.ttsQuality) el.ttsQuality.value = s.ttsQuality || "google-wavenet";
+  if (el.googleKey) el.googleKey.value = s.googleKey || "";
+  if (el.googleVoice) el.googleVoice.value = s.googleVoice || "cmn-TW-Wavenet-A";
+  if (el.openaiKey) el.openaiKey.value = s.openaiKey || "";
+  if (el.openaiVoice) el.openaiVoice.value = s.openaiVoice || "nova";
+  if (el.readerId) el.readerId.value = readerId;
+  if (el.syncCode) el.syncCode.value = s.syncCode || readerId.slice(0, 8);
 }
 
 /* ---------------- persistence: localStorage + IndexedDB ---------------- */
@@ -295,53 +332,115 @@ function writeProgressToUrl() {
     u.searchParams.set("book", state.book.sourceUrl);
     u.searchParams.set("c", String(state.chapterIndex));
     u.searchParams.set("p", String(state.speakFrom || 0));
-    const code = loadSettings().syncCode;
-    if (code) u.searchParams.set("sync", code);
+    const s = loadSettings();
+    if (s.readerId) u.searchParams.set("reader", s.readerId);
+    if (s.syncCode) u.searchParams.set("sync", s.syncCode);
     history.replaceState(null, "", u.toString());
   } catch {
     /* ignore */
   }
 }
 
-/* ---------------- cloud sync ---------------- */
+/* ---------------- cloud sync (Cloudflare KV default) ---------------- */
 
 let syncTimer = null;
+let lastCloudPushAt = 0;
+let quietCloud = false;
+
 function scheduleCloudSync() {
-  const code = loadSettings().syncCode;
-  if (!code) return;
+  ensureReaderId();
   clearTimeout(syncTimer);
   syncTimer = setTimeout(() => {
-    pushSync().catch(() => {});
-  }, 1200);
+    pushSync({ quiet: true }).catch(() => {});
+  }, 900);
 }
 
-async function pushSync() {
+async function pushSync({ quiet = false } = {}) {
   const library = await loadStore();
   const settings = loadSettings();
+  const readerId = ensureReaderId();
   const data = await api("/api/sync", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ code: settings.syncCode || undefined, library }),
+    body: JSON.stringify({
+      readerId,
+      code: settings.syncCode || readerId.slice(0, 8),
+      library,
+    }),
   });
-  if (data.code) {
-    saveSettings({ syncCode: data.code });
-    el.syncCode.value = data.code;
+  const patch = {};
+  if (data.readerId) patch.readerId = data.readerId;
+  if (data.code) patch.syncCode = data.code;
+  if (Object.keys(patch).length) saveSettings(patch);
+  if (el.readerId && data.readerId) el.readerId.value = data.readerId;
+  if (el.syncCode && data.code) el.syncCode.value = data.code;
+  lastCloudPushAt = Date.now();
+  if (!quiet && !quietCloud) {
+    setStatus(`進度已上傳至 Cloudflare（備份碼 ${data.code || data.readerId}）`);
   }
-  setStatus(`進度已上傳，同步碼：${data.code}`);
-  return data.code;
+  return data.code || data.readerId;
 }
 
-async function pullSync(code) {
-  const c = String(code || el.syncCode.value || "")
+async function pullSync({ code, readerId, quiet = false } = {}) {
+  const settings = loadSettings();
+  const rid = String(readerId || settings.readerId || "")
     .trim()
     .toUpperCase();
-  if (!c) throw new Error("請先輸入同步碼");
-  const data = await api(`/api/sync?code=${encodeURIComponent(c)}`);
-  await saveStore(data.library);
-  saveSettings({ syncCode: c });
-  el.syncCode.value = c;
+  const c = String(code || settings.syncCode || "")
+    .trim()
+    .toUpperCase();
+  let path = "";
+  if (rid) path = `/api/sync?readerId=${encodeURIComponent(rid)}`;
+  else if (c) path = `/api/sync?code=${encodeURIComponent(c)}`;
+  else throw new Error("尚無讀者 ID 或同步碼");
+
+  const data = await api(path);
+  if (!data.library) throw new Error("雲端沒有進度資料");
+
+  // Prefer newer library by book updatedAt max
+  const local = await loadStore();
+  const localMax = Math.max(0, ...(local.books || []).map((b) => b.updatedAt || 0));
+  const cloudMax = Math.max(
+    0,
+    data.updatedAt || 0,
+    ...(data.library.books || []).map((b) => b.updatedAt || 0),
+  );
+  if (cloudMax >= localMax || !(local.books || []).length) {
+    await saveStore(data.library);
+  } else {
+    // merge: take newer per book key
+    const map = new Map();
+    for (const b of local.books || []) map.set(bookKey(b.sourceUrl), b);
+    for (const b of data.library.books || []) {
+      const k = bookKey(b.sourceUrl);
+      const prev = map.get(k);
+      if (!prev || (b.updatedAt || 0) >= (prev.updatedAt || 0)) map.set(k, b);
+    }
+    const books = [...map.values()].sort(
+      (a, b) => (b.updatedAt || 0) - (a.updatedAt || 0),
+    );
+    await saveStore({
+      books,
+      lastSourceUrl:
+        data.library.lastSourceUrl || local.lastSourceUrl || books[0]?.sourceUrl || "",
+    });
+  }
+
+  const patch = {};
+  if (data.readerId) patch.readerId = data.readerId;
+  if (c) patch.syncCode = c;
+  else if (data.code) patch.syncCode = data.code;
+  if (Object.keys(patch).length) saveSettings(patch);
+  if (el.readerId && (data.readerId || rid)) {
+    el.readerId.value = data.readerId || rid;
+  }
+  if (el.syncCode) el.syncCode.value = loadSettings().syncCode || "";
   await renderLibrary();
-  setStatus(`已拉取同步碼 ${c} 的進度`);
+  if (!quiet) {
+    setStatus(
+      `已從 Cloudflare 還原進度（${data.readerId || rid || c}）`,
+    );
+  }
   return data.library;
 }
 
@@ -392,11 +491,66 @@ async function unlockAudio() {
 
 /* ---------------- TTS engines ---------------- */
 
-function useOpenAiTts() {
+/** Server-side key availability from /api/health (optional). */
+const serverTts = { hasGoogle: false, hasOpenAI: false, loaded: false };
+
+async function refreshServerTts() {
+  try {
+    const h = await api("/api/health");
+    serverTts.hasGoogle = Boolean(h?.tts?.hasGoogle);
+    serverTts.hasOpenAI = Boolean(h?.tts?.hasOpenAI);
+  } catch {
+    /* ignore */
+  }
+  serverTts.loaded = true;
+}
+
+function resolveTtsPlan() {
   const s = loadSettings();
-  if (s.ttsEngine === "browser") return false;
-  if (s.ttsEngine === "openai") return Boolean(s.openaiKey);
-  return Boolean(s.openaiKey); // auto
+  const engine = s.ttsEngine || "auto";
+  const quality = s.ttsQuality || "google-wavenet";
+  const hasGoogle = Boolean(s.googleKey) || serverTts.hasGoogle;
+  const hasOpenAi = Boolean(s.openaiKey) || serverTts.hasOpenAI;
+
+  const googleVoice =
+    quality === "google-standard"
+      ? (s.googleVoice || "cmn-TW-Standard-A").replace("Wavenet", "Standard")
+      : s.googleVoice || "cmn-TW-Wavenet-A";
+  const openaiModel = quality === "openai-tts-1-hd" ? "tts-1-hd" : "tts-1";
+
+  if (engine === "browser") return { mode: "browser" };
+
+  if (engine === "google") {
+    // Try cloud even without local key (Worker secret may exist)
+    return { mode: "cloud", provider: "google", voice: googleVoice };
+  }
+  if (engine === "openai") {
+    return {
+      mode: "cloud",
+      provider: "openai",
+      voice: s.openaiVoice || "nova",
+      model: openaiModel,
+    };
+  }
+
+  // auto: prefer Google TW WaveNet when any Google path exists, else OpenAI, else try Google then browser fallback
+  if (hasGoogle || quality.startsWith("google")) {
+    return { mode: "cloud", provider: "google", voice: googleVoice };
+  }
+  if (hasOpenAi || quality.startsWith("openai")) {
+    return {
+      mode: "cloud",
+      provider: "openai",
+      voice: s.openaiVoice || "nova",
+      model: openaiModel,
+    };
+  }
+  // No known keys — still try Google first (Worker may have secret); speakNext falls back to browser
+  return { mode: "cloud", provider: "auto", voice: googleVoice };
+}
+
+function useCloudTts() {
+  return resolveTtsPlan().mode === "cloud";
 }
 
 function pickZhTwFemaleVoice() {
@@ -505,14 +659,15 @@ async function speakNext() {
   await saveProgress({ paragraphIndex: i });
 
   try {
-    if (useOpenAiTts()) {
-      await speakOpenAiParagraph(text, token);
+    const plan = resolveTtsPlan();
+    if (plan.mode === "cloud") {
+      await speakCloudParagraph(text, token, plan);
     } else {
       await speakBrowserParagraph(text, token);
     }
   } catch (err) {
     console.warn("tts error, fallback browser", err);
-    if (useOpenAiTts()) {
+    if (useCloudTts()) {
       setStatus(`雲端 TTS 失敗，改用瀏覽器語音：${err.message || err}`);
       try {
         await speakBrowserParagraph(text, token);
@@ -581,20 +736,24 @@ function speakBrowserParagraph(text, token) {
   });
 }
 
-async function speakOpenAiParagraph(text, token) {
+async function speakCloudParagraph(text, token, plan) {
   const s = loadSettings();
+  const headers = { "content-type": "application/json" };
+  if (s.googleKey) headers["x-google-tts-key"] = s.googleKey;
+  if (s.openaiKey) headers["x-openai-key"] = s.openaiKey;
+
+  const body = {
+    text,
+    provider: plan.provider || "auto",
+    voice: plan.voice,
+    speed: state.rate,
+  };
+  if (plan.provider === "openai") body.model = plan.model || "tts-1";
+
   const res = await fetch("/api/tts", {
     method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-openai-key": s.openaiKey,
-    },
-    body: JSON.stringify({
-      text,
-      voice: s.openaiVoice || "nova",
-      speed: state.rate,
-      model: "tts-1-hd",
-    }),
+    headers,
+    body: JSON.stringify(body),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -636,7 +795,7 @@ async function pauseSpeech() {
   state.paused = true;
   updateToggleLabel();
   try {
-    if (useOpenAiTts() && el.ttsAudio && !el.ttsAudio.paused) el.ttsAudio.pause();
+    if (useCloudTts() && el.ttsAudio && !el.ttsAudio.paused) el.ttsAudio.pause();
     else speechSynthesis.pause();
   } catch {
     /* ignore */
@@ -654,13 +813,10 @@ async function resumeSpeech() {
   state.paused = false;
   updateToggleLabel();
   try {
-    if (useOpenAiTts() && el.ttsAudio?.src) {
+    if (useCloudTts() && el.ttsAudio?.src) {
       await el.ttsAudio.play();
-      // after audio ends, speakNext chain continues via onended already set
-      // if paused mid-chain, need to continue loop — audio onended will fire
     } else {
       speechSynthesis.resume();
-      // if utterance was lost (iOS), restart paragraph
       if (!speechSynthesis.speaking && !speechSynthesis.pending) {
         await speakFrom(state.speakFrom || 0);
         return;
@@ -1300,41 +1456,76 @@ function bindUi() {
     }
   });
 
-  el.ttsEngine.addEventListener("change", () =>
+  el.ttsEngine?.addEventListener("change", () =>
     saveSettings({ ttsEngine: el.ttsEngine.value }),
   );
-  el.openaiKey.addEventListener("change", () =>
+  el.ttsQuality?.addEventListener("change", () => {
+    const q = el.ttsQuality.value;
+    const patch = { ttsQuality: q };
+    if (q === "google-standard" && el.googleVoice) {
+      const v = (el.googleVoice.value || "").replace("Wavenet", "Standard");
+      el.googleVoice.value = v;
+      patch.googleVoice = v;
+    } else if (q === "google-wavenet" && el.googleVoice) {
+      const v = (el.googleVoice.value || "").replace("Standard", "Wavenet");
+      el.googleVoice.value = v;
+      patch.googleVoice = v;
+    }
+    saveSettings(patch);
+  });
+  el.googleKey?.addEventListener("change", () =>
+    saveSettings({ googleKey: el.googleKey.value.trim() }),
+  );
+  el.googleVoice?.addEventListener("change", () =>
+    saveSettings({ googleVoice: el.googleVoice.value }),
+  );
+  el.openaiKey?.addEventListener("change", () =>
     saveSettings({ openaiKey: el.openaiKey.value.trim() }),
   );
-  el.openaiVoice.addEventListener("change", () =>
+  el.openaiVoice?.addEventListener("change", () =>
     saveSettings({ openaiVoice: el.openaiVoice.value }),
   );
-  el.syncCode.addEventListener("change", () =>
+  el.syncCode?.addEventListener("change", () =>
     saveSettings({ syncCode: el.syncCode.value.trim().toUpperCase() }),
   );
 
-  document.getElementById("btn-sync-push").addEventListener("click", async () => {
+  document.getElementById("btn-sync-push")?.addEventListener("click", async () => {
     try {
-      await pushSync();
+      await pushSync({ quiet: false });
     } catch (err) {
       setStatus(String(err.message || err));
     }
   });
-  document.getElementById("btn-sync-pull").addEventListener("click", async () => {
+  document.getElementById("btn-sync-pull")?.addEventListener("click", async () => {
     try {
-      const lib = await pullSync();
+      const code = el.syncCode?.value?.trim();
+      const lib = await pullSync({
+        code: code || undefined,
+        readerId: code ? undefined : ensureReaderId(),
+      });
       const last = lib.lastSourceUrl || lib.books?.[0]?.sourceUrl;
       if (last) await openBook(last, { resume: true, autoplay: false });
     } catch (err) {
       setStatus(String(err.message || err));
     }
   });
-  document.getElementById("btn-sync-copy").addEventListener("click", async () => {
+  document.getElementById("btn-reader-copy")?.addEventListener("click", async () => {
     try {
+      const id = ensureReaderId();
+      await navigator.clipboard.writeText(id);
+      setStatus(`已複製備份碼 ${id}`);
+    } catch (err) {
+      setStatus(String(err.message || err));
+    }
+  });
+  document.getElementById("btn-sync-copy")?.addEventListener("click", async () => {
+    try {
+      ensureReaderId();
       let code = loadSettings().syncCode;
-      if (!code) code = await pushSync();
+      if (!code) code = await pushSync({ quiet: true });
       const u = new URL(location.origin);
       u.searchParams.set("sync", code);
+      u.searchParams.set("reader", loadSettings().readerId);
       await navigator.clipboard.writeText(u.toString());
       setStatus("已複製書籤連結");
     } catch (err) {
@@ -1363,18 +1554,24 @@ function bindUi() {
 async function bootFromUrl() {
   const u = new URL(location.href);
   const sync = u.searchParams.get("sync");
-  if (sync) {
+  const reader = u.searchParams.get("reader");
+  if (sync || reader) {
     try {
-      await pullSync(sync);
+      if (reader) saveSettings({ readerId: reader.trim().toUpperCase() });
+      await pullSync({
+        code: sync || undefined,
+        readerId: reader || undefined,
+        quiet: true,
+      });
+      setStatus("已從連結還原 Cloudflare 進度");
     } catch (err) {
-      setStatus(`同步碼拉取失敗：${err.message || err}`);
+      setStatus(`雲端進度拉取失敗：${err.message || err}`);
     }
   }
   const book = u.searchParams.get("book");
   const c = u.searchParams.get("c");
   const p = u.searchParams.get("p");
   if (book) {
-    // seed progress from URL if provided
     if (c != null) {
       await upsertBook({
         sourceUrl: book,
@@ -1390,34 +1587,69 @@ async function bootFromUrl() {
   return false;
 }
 
+async function bootCloudPull() {
+  const readerId = ensureReaderId();
+  try {
+    await pullSync({ readerId, quiet: true });
+    return true;
+  } catch (err) {
+    // NOT_FOUND is fine for first-time readers
+    if (String(err.message || err).includes("找不到")) return false;
+    console.warn("bootCloudPull", err);
+    return false;
+  }
+}
+
 async function boot() {
   ensureVoices();
   bindUi();
   setupRecognition();
+  ensureReaderId();
   fillSettingsForm();
+  await refreshServerTts();
+
+  // Prefer Cloudflare progress as default source of truth on boot
+  const fromUrl = await bootFromUrl();
+  if (!fromUrl) {
+    setStatus("正在從 Cloudflare 還原進度…");
+    await bootCloudPull();
+  }
+
   await renderLibrary();
 
-  const fromUrl = await bootFromUrl();
-  if (fromUrl) return;
+  if (fromUrl) {
+    scheduleCloudSync();
+    return;
+  }
 
   const store = await loadStore();
   if (store.lastSourceUrl) el.tocUrl.value = store.lastSourceUrl;
   const last = store.lastSourceUrl && (await getBookRecord(store.lastSourceUrl));
   if (last?.progress && last.progress.chapterIndex != null) {
-    // 進站自動還原到上次章節（不自動出聲，避免被瀏覽器擋）
     setStatus("正在還原上次進度…");
     try {
       await openBook(last.sourceUrl, { resume: true, autoplay: false });
-      setStatus(`已還原：${formatProgress(last)} · 按「朗讀」或說「繼續唸」`);
+      setStatus(
+        `已還原：${formatProgress(last)} · 按「朗讀」或說「繼續唸」（進度已同步雲端）`,
+      );
+      scheduleCloudSync();
       return;
     } catch (err) {
       setStatus(`還原失敗：${err.message || err}`);
     }
   }
+
+  const plan = resolveTtsPlan();
+  const ttsHint =
+    plan.mode === "cloud" && plan.provider === "google"
+      ? "預設 Google WaveNet 台灣口音。"
+      : plan.mode === "cloud"
+        ? "使用 OpenAI TTS。"
+        : "建議在設定貼 Google TTS Key（台灣口音·最划算）。";
   setStatus(
     (await getBooks()).length
-      ? "就緒。可從書單繼續，或載入新目錄。"
-      : "就緒。載入目錄後會記住進度；建議在設定貼 OpenAI Key 以獲較自然語音。",
+      ? `就緒。${ttsHint}`
+      : `就緒。載入目錄後會自動記住並上傳進度。${ttsHint}`,
   );
 }
 

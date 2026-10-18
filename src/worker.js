@@ -36,7 +36,12 @@ export default {
               ok: true,
               service: "novel-reader",
               kv: Boolean(env.PROGRESS),
-              tts: "openai-proxy+browser-fallback",
+              tts: {
+                default: "google-wavenet-cmn-TW",
+                providers: ["google", "openai", "browser"],
+                hasGoogle: Boolean(env.GOOGLE_TTS_API_KEY),
+                hasOpenAI: Boolean(env.OPENAI_API_KEY),
+              },
             }),
           );
         }
@@ -90,16 +95,34 @@ async function handleSync(request, url, env) {
   }
 
   if (request.method === "GET") {
+    const readerId = String(url.searchParams.get("readerId") || "")
+      .trim()
+      .toUpperCase();
     const code = String(url.searchParams.get("code") || "")
       .trim()
       .toUpperCase();
-    if (!/^[A-Z0-9]{6,12}$/.test(code)) {
+    const key = readerId
+      ? `reader:${readerId}`
+      : code
+        ? `sync:${code}`
+        : "";
+    if (!key) return json({ error: "需要 readerId 或 code" }, 400);
+    if (readerId && !/^[A-Z0-9]{8,20}$/.test(readerId)) {
+      return json({ error: "readerId 格式不正確" }, 400);
+    }
+    if (code && !readerId && !/^[A-Z0-9]{6,12}$/.test(code)) {
       return json({ error: "同步碼格式不正確" }, 400);
     }
-    const raw = await env.PROGRESS.get(`sync:${code}`);
-    if (!raw) return json({ error: "找不到此同步碼或已過期" }, 404);
+    const raw = await env.PROGRESS.get(key);
+    if (!raw) return json({ error: "找不到此進度或尚未上傳", code: "NOT_FOUND" }, 404);
     const data = JSON.parse(raw);
-    return json({ ok: true, code, library: data });
+    return json({
+      ok: true,
+      readerId: readerId || data.readerId || null,
+      code: code || null,
+      library: data.library || data,
+      updatedAt: data.updatedAt || null,
+    });
   }
 
   if (request.method === "POST" || request.method === "PUT") {
@@ -108,22 +131,42 @@ async function handleSync(request, url, env) {
     if (!library || !Array.isArray(library.books)) {
       return json({ error: "缺少 library.books" }, 400);
     }
-    // size guard (~400KB)
-    const packed = JSON.stringify(library);
-    if (packed.length > 400_000) {
+    const packedLib = JSON.stringify(library);
+    if (packedLib.length > 400_000) {
       return json({ error: "進度資料過大" }, 413);
     }
+
+    let readerId = String(body.readerId || "")
+      .trim()
+      .toUpperCase();
+    if (readerId && !/^[A-Z0-9]{8,20}$/.test(readerId)) {
+      return json({ error: "readerId 格式不正確" }, 400);
+    }
+    if (!readerId) readerId = randomCode(12);
+
     let code = String(body.code || "")
       .trim()
       .toUpperCase();
     if (code && !/^[A-Z0-9]{6,12}$/.test(code)) {
       return json({ error: "同步碼格式不正確" }, 400);
     }
-    if (!code) code = randomCode(8);
-    await env.PROGRESS.put(`sync:${code}`, packed, {
+    // backup code mirrors reader prefix for human sharing
+    if (!code) code = readerId.slice(0, 8);
+
+    const payload = JSON.stringify({
+      readerId,
+      code,
+      updatedAt: Date.now(),
+      library,
+    });
+
+    await env.PROGRESS.put(`reader:${readerId}`, payload, {
       expirationTtl: SYNC_TTL_SECONDS,
     });
-    return json({ ok: true, code });
+    await env.PROGRESS.put(`sync:${code}`, payload, {
+      expirationTtl: SYNC_TTL_SECONDS,
+    });
+    return json({ ok: true, readerId, code });
   }
 
   return json({ error: "Method not allowed" }, 405);
@@ -138,28 +181,117 @@ async function handleTts(request, env) {
   if (!text) return json({ error: "缺少 text" }, 400);
   if (text.length > 2200) return json({ error: "單段文字過長" }, 400);
 
-  const key =
-    request.headers.get("x-openai-key") ||
-    env.OPENAI_API_KEY ||
-    "";
+  const speed = Math.min(1.5, Math.max(0.75, Number(body.speed) || 1));
+  let provider = String(body.provider || "auto").toLowerCase();
+
+  const googleKey =
+    request.headers.get("x-google-tts-key") || env.GOOGLE_TTS_API_KEY || "";
+  const openaiKey =
+    request.headers.get("x-openai-key") || env.OPENAI_API_KEY || "";
+
+  if (provider === "auto") {
+    if (googleKey) provider = "google";
+    else if (openaiKey) provider = "openai";
+    else {
+      return json(
+        {
+          error:
+            "未設定雲端 TTS Key。預設建議 Google WaveNet cmn-TW（最便宜且台灣口音）。請在設定貼上 Google TTS API Key，或 wrangler secret put GOOGLE_TTS_API_KEY。",
+          code: "NO_KEY",
+          recommend: "google",
+        },
+        400,
+      );
+    }
+  }
+
+  if (provider === "google") {
+    return await ttsGoogle(text, speed, body, googleKey);
+  }
+  if (provider === "openai") {
+    return await ttsOpenAi(text, speed, body, openaiKey);
+  }
+  return json({ error: `未知 provider：${provider}` }, 400);
+}
+
+async function ttsGoogle(text, speed, body, key) {
   if (!key) {
     return json(
       {
         error:
-          "未設定 OpenAI API Key。請在設定頁貼上 key，或對 Worker 設定 secret OPENAI_API_KEY。",
+          "未設定 Google TTS API Key（設定頁或 secret GOOGLE_TTS_API_KEY）",
         code: "NO_KEY",
       },
       400,
     );
   }
+  const voiceName = [
+    "cmn-TW-Wavenet-A",
+    "cmn-TW-Wavenet-B",
+    "cmn-TW-Wavenet-C",
+    "cmn-TW-Standard-A",
+    "cmn-TW-Standard-B",
+    "cmn-TW-Standard-C",
+  ].includes(body.voice)
+    ? body.voice
+    : "cmn-TW-Wavenet-A";
 
+  const upstream = await fetch(
+    `https://texttospeech.googleapis.com/v1/text:synthesize?key=${encodeURIComponent(key)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        input: { text },
+        voice: {
+          languageCode: "cmn-TW",
+          name: voiceName,
+        },
+        audioConfig: {
+          audioEncoding: "MP3",
+          speakingRate: speed,
+        },
+      }),
+    },
+  );
+  if (!upstream.ok) {
+    const errText = await upstream.text();
+    return json(
+      {
+        error: `Google TTS 失敗（${upstream.status}）`,
+        detail: errText.slice(0, 400),
+      },
+      502,
+    );
+  }
+  const data = await upstream.json();
+  if (!data.audioContent) {
+    return json({ error: "Google TTS 未回傳 audioContent" }, 502);
+  }
+  const bin = Uint8Array.from(atob(data.audioContent), (c) => c.charCodeAt(0));
+  return new Response(bin, {
+    status: 200,
+    headers: ttsHeaders({ "x-tts-provider": "google", "x-tts-voice": voiceName }),
+  });
+}
+
+async function ttsOpenAi(text, speed, body, key) {
+  if (!key) {
+    return json(
+      {
+        error:
+          "未設定 OpenAI API Key（設定頁或 secret OPENAI_API_KEY）",
+        code: "NO_KEY",
+      },
+      400,
+    );
+  }
   const voice = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"].includes(
     body.voice,
   )
     ? body.voice
     : "nova";
-  const speed = Math.min(1.5, Math.max(0.75, Number(body.speed) || 1));
-  const model = body.model === "tts-1" ? "tts-1" : "tts-1-hd";
+  const model = body.model === "tts-1-hd" ? "tts-1-hd" : "tts-1";
 
   const upstream = await fetch("https://api.openai.com/v1/audio/speech", {
     method: "POST",
@@ -189,14 +321,20 @@ async function handleTts(request, env) {
 
   return new Response(upstream.body, {
     status: 200,
-    headers: {
-      "content-type": "audio/mpeg",
-      "cache-control": "no-store",
-      "access-control-allow-origin": "*",
-      "access-control-allow-headers": "content-type, x-openai-key",
-      "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
-    },
+    headers: ttsHeaders({ "x-tts-provider": "openai", "x-tts-voice": voice }),
   });
+}
+
+function ttsHeaders(extra = {}) {
+  return {
+    "content-type": "audio/mpeg",
+    "cache-control": "no-store",
+    "access-control-allow-origin": "*",
+    "access-control-allow-headers":
+      "content-type, x-openai-key, x-google-tts-key",
+    "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+    ...extra,
+  };
 }
 
 function randomCode(n) {
@@ -418,7 +556,7 @@ function cors(res) {
   headers.set("access-control-allow-methods", "GET, POST, PUT, OPTIONS");
   headers.set(
     "access-control-allow-headers",
-    "content-type, x-openai-key",
+    "content-type, x-openai-key, x-google-tts-key",
   );
   return new Response(res.body, { status: res.status, headers });
 }

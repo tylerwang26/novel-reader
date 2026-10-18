@@ -1,6 +1,7 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "novel-reader",
+  "account_id": "dbca1483317702b91adb83ce3b312440",
   "main": "src/worker.js",
   "compatibility_date": "2026-10-18",
   "assets": {
