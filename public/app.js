@@ -690,8 +690,51 @@ async function speakFrom(index = 0) {
   state.speaking = true;
   state.paused = false;
   updateToggleLabel();
-  await saveProgress();
+  markParagraphCursor(state.speakFrom);
+  await saveProgress({ paragraphIndex: state.speakFrom });
   await speakNext();
+}
+
+/** Jump to a paragraph and start (or restart) reading from there. */
+async function jumpToParagraph(index) {
+  const max = Math.max(0, (state.paragraphs?.length || 1) - 1);
+  const i = Math.min(Math.max(0, Number(index) || 0), max);
+  setStatus(`從第 ${i + 1} 段開始朗讀…`);
+  await speakFrom(i);
+}
+
+function markParagraphCursor(index) {
+  if (!el.content) return;
+  el.content.querySelectorAll("p.is-cursor").forEach((p) => {
+    p.classList.remove("is-cursor");
+  });
+  const node = el.content.children[index];
+  if (node) {
+    node.classList.add("is-cursor");
+    node.setAttribute("aria-current", "true");
+  }
+  el.content.querySelectorAll("p[aria-current='true']").forEach((p) => {
+    if (p !== node) p.removeAttribute("aria-current");
+  });
+}
+
+function mountParagraphs(paragraphs) {
+  if (!el.content) return;
+  el.content.innerHTML = "";
+  paragraphs.forEach((text, i) => {
+    const node = document.createElement("p");
+    node.textContent = text;
+    node.dataset.index = String(i);
+    node.setAttribute("role", "button");
+    node.setAttribute("tabindex", "0");
+    node.setAttribute(
+      "aria-label",
+      `第 ${i + 1} 段，點擊從此處開始朗讀`,
+    );
+    node.title = "點擊從此段開始朗讀";
+    el.content.appendChild(node);
+  });
+  if (state.speakFrom != null) markParagraphCursor(state.speakFrom);
 }
 
 async function speakNext() {
@@ -1192,12 +1235,7 @@ async function loadChapter(
   const maxPara = Math.max(0, state.paragraphs.length - 1);
   state.speakFrom = Math.min(Math.max(0, paragraphIndex), maxPara);
   el.chapterTitle.textContent = data.title || ch.title;
-  el.content.innerHTML = "";
-  state.paragraphs.forEach((p) => {
-    const node = document.createElement("p");
-    node.textContent = p;
-    el.content.appendChild(node);
-  });
+  mountParagraphs(state.paragraphs);
   renderChapterList();
   await saveProgress({
     chapterIndex: index,
@@ -1472,13 +1510,7 @@ function returnToReader() {
 }
 
 function renderParagraphs(paragraphs) {
-  if (!el.content) return;
-  el.content.innerHTML = "";
-  for (const p of paragraphs) {
-    const node = document.createElement("p");
-    node.textContent = p;
-    el.content.appendChild(node);
-  }
+  mountParagraphs(paragraphs || []);
 }
 
 function goHome() {
@@ -1497,6 +1529,23 @@ function bindUi() {
   };
   document.addEventListener("pointerdown", unlockOnce, { passive: true });
   document.addEventListener("touchstart", unlockOnce, { passive: true });
+
+  // Click / keyboard: jump to paragraph and read from there
+  el.content?.addEventListener("click", async (e) => {
+    const p = e.target?.closest?.("p[data-index]");
+    if (!p || !el.content.contains(p)) return;
+    e.preventDefault();
+    await unlockAudio();
+    await jumpToParagraph(Number(p.dataset.index));
+  });
+  el.content?.addEventListener("keydown", async (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    const p = e.target?.closest?.("p[data-index]");
+    if (!p || !el.content.contains(p)) return;
+    e.preventDefault();
+    await unlockAudio();
+    await jumpToParagraph(Number(p.dataset.index));
+  });
 
   el.tocForm.addEventListener("submit", async (e) => {
     e.preventDefault();
