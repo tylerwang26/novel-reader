@@ -329,6 +329,18 @@ button {
   color: var(--pine-deep);
 }
 
+.engine-badge {
+  margin: 0.25rem 0 0;
+  display: inline-block;
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  color: var(--pine-deep);
+  background: rgba(31, 92, 78, 0.1);
+  border: 1px solid rgba(31, 92, 78, 0.18);
+  border-radius: 999px;
+  padding: 0.2rem 0.7rem;
+}
+
 .reader-toolbar {
   display: flex;
   flex-wrap: wrap;

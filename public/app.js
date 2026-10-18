@@ -22,6 +22,10 @@ const state = {
   audioCtx: null,
   ttsToken: 0,
   currentAudio: null,
+  currentBufferSource: null,
+  lastEngine: "",
+  lastVoice: "",
+  cloudFailStreak: 0,
 };
 
 const el = {
@@ -62,8 +66,40 @@ const el = {
   unlockAudio: document.getElementById("unlock-audio"),
   ttsAudio: document.getElementById("tts-audio"),
   readerStatus: document.getElementById("reader-status"),
+  engineBadge: document.getElementById("engine-badge"),
   btnBackReader: document.getElementById("btn-back-reader"),
 };
+
+const SILENT_MP3 =
+  "data:audio/mp3;base64,//uQZAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAACcQCAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICA//////////////////////////////////////////////////////////////////8AAAA5TEFNRTMuMTAwAZYAAAAAAAAAABUgJAUHQQAB9gAAAnGPqZEIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+function isIOSLike() {
+  const ua = navigator.userAgent || "";
+  return (
+    /iPad|iPhone|iPod/.test(ua) ||
+    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1)
+  );
+}
+
+function setEngineBadge(label) {
+  if (el.engineBadge) el.engineBadge.textContent = label || "";
+  state.lastEngine = label || "";
+}
+
+function engineLabel(provider, voice, viaBrowser = false) {
+  if (viaBrowser) return "正在用：系統語音（瀏覽器）";
+  const p = String(provider || "").toLowerCase();
+  if (p === "gemini") return `正在用：Google Gemini · ${voice || "Leda"}`;
+  if (p === "google") {
+    if (String(voice || "").includes("Wavenet"))
+      return `正在用：Google WaveNet · ${voice}`;
+    if (String(voice || "").includes("Standard"))
+      return `正在用：Google Standard · ${voice}`;
+    return `正在用：Google · ${voice || ""}`;
+  }
+  if (p === "openai") return `正在用：OpenAI · ${voice || "nova"}`;
+  return `正在用：雲端 TTS · ${voice || provider || ""}`;
+}
 
 const GEMINI_FEMALE = new Set([
   "Leda",
@@ -485,43 +521,52 @@ async function pullSync({ code, readerId, quiet = false } = {}) {
   return data.library;
 }
 
-/* ---------------- audio unlock (mobile) ---------------- */
+/* ---------------- audio unlock (mobile / iOS) ---------------- */
+
+async function primeHtmlAudio(audio) {
+  if (!audio) return false;
+  try {
+    audio.setAttribute("playsinline", "");
+    audio.setAttribute("webkit-playsinline", "");
+    audio.muted = false;
+    audio.volume = 1;
+    // Must unlock the SAME element that will play cloud TTS later
+    if (!audio.src || audio.src === location.href) {
+      audio.src = SILENT_MP3;
+    }
+    const p = audio.play();
+    if (p && p.then) await p;
+    audio.pause();
+    try {
+      audio.currentTime = 0;
+    } catch {
+      /* ignore */
+    }
+    return true;
+  } catch (err) {
+    console.warn("primeHtmlAudio", err);
+    return false;
+  }
+}
 
 async function unlockAudio() {
-  if (state.audioUnlocked) return true;
   try {
     const AC = window.AudioContext || window.webkitAudioContext;
     if (AC) {
       state.audioCtx = state.audioCtx || new AC();
-      if (state.audioCtx.state === "suspended") await state.audioCtx.resume();
+      if (state.audioCtx.state === "suspended") {
+        await state.audioCtx.resume();
+      }
+      // short silent buffer keeps context hot on iOS
       const buf = state.audioCtx.createBuffer(1, 1, 22050);
       const src = state.audioCtx.createBufferSource();
       src.buffer = buf;
       src.connect(state.audioCtx.destination);
       src.start(0);
     }
-    // also poke HTMLAudioElement (iOS)
-    const a = el.unlockAudio;
-    if (a) {
-      a.src =
-        "data:audio/mp3;base64,//uQZAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAACcQCAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICA//////////////////////////////////////////////////////////////////8AAAA5TEFNRTMuMTAwAZYAAAAAAAAAABUgJAUHQQAB9gAAAnGPqZEIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-      a.volume = 0.01;
-      try {
-        await a.play();
-        a.pause();
-      } catch {
-        /* ignore */
-      }
-    }
-    // warm speechSynthesis on supporting browsers
-    if ("speechSynthesis" in window) {
-      speechSynthesis.cancel();
-      const warm = new SpeechSynthesisUtterance(" ");
-      warm.volume = 0;
-      warm.rate = 1;
-      speechSynthesis.speak(warm);
-      speechSynthesis.cancel();
-    }
+    // Prime BOTH unlock helper and the real TTS element (critical on iOS)
+    await primeHtmlAudio(el.unlockAudio);
+    await primeHtmlAudio(el.ttsAudio);
     state.audioUnlocked = true;
     return true;
   } catch (err) {
@@ -540,8 +585,19 @@ async function refreshServerTts() {
     const h = await api("/api/health");
     serverTts.hasGoogle = Boolean(h?.tts?.hasGoogle);
     serverTts.hasOpenAI = Boolean(h?.tts?.hasOpenAI);
+    const plan = resolveTtsPlan();
+    if (plan.mode === "cloud") {
+      const bits = [];
+      if (serverTts.hasGoogle) bits.push("Google");
+      if (serverTts.hasOpenAI) bits.push("OpenAI");
+      setEngineBadge(
+        `預設雲端：${bits.join(" / ") || "偵測中"} · ${plan.voice || "Leda"}（系統語音僅備援）`,
+      );
+    } else {
+      setEngineBadge(engineLabel(null, null, true));
+    }
   } catch {
-    /* ignore */
+    setEngineBadge("語音引擎：無法偵測（將仍嘗試雲端）");
   }
   serverTts.loaded = true;
 }
@@ -656,11 +712,22 @@ function stopSpeech() {
   } catch {
     /* ignore */
   }
+  if (state.currentBufferSource) {
+    try {
+      state.currentBufferSource.stop(0);
+    } catch {
+      /* ignore */
+    }
+    state.currentBufferSource = null;
+  }
   if (el.ttsAudio) {
     try {
       el.ttsAudio.pause();
-      el.ttsAudio.removeAttribute("src");
-      el.ttsAudio.load();
+      // Keep src primed on iOS — don't strip to empty (breaks unlock)
+      if (el.ttsAudio.src && !el.ttsAudio.src.startsWith("data:")) {
+        el.ttsAudio.removeAttribute("src");
+        el.ttsAudio.load();
+      }
     } catch {
       /* ignore */
     }
@@ -680,10 +747,17 @@ function stopSpeech() {
 }
 
 async function speakFrom(index = 0) {
+  // Must run unlock inside the user-gesture turn (iOS)
   await unlockAudio();
   if (!state.paragraphs.length) {
     setStatus("沒有可朗讀的正文");
     return;
+  }
+  const plan = resolveTtsPlan();
+  if (plan.mode === "cloud") {
+    setEngineBadge(`準備雲端語音（${plan.provider}）…`);
+  } else {
+    setEngineBadge(engineLabel(null, null, true));
   }
   stopSpeech();
   state.speakFrom = Math.max(0, index);
@@ -692,6 +766,8 @@ async function speakFrom(index = 0) {
   updateToggleLabel();
   markParagraphCursor(state.speakFrom);
   await saveProgress({ paragraphIndex: state.speakFrom });
+  // Re-prime after stopSpeech may have cleared audio src
+  await unlockAudio();
   await speakNext();
 }
 
@@ -772,15 +848,29 @@ async function speakNext() {
 
   try {
     const plan = resolveTtsPlan();
-    if (plan.mode === "cloud") {
-      await speakCloudParagraph(text, token, plan);
-    } else {
+    if (plan.mode === "browser") {
+      setEngineBadge(engineLabel(null, null, true));
       await speakBrowserParagraph(text, token);
+    } else {
+      await speakCloudWithFallback(text, token, plan);
     }
+    state.cloudFailStreak = 0;
   } catch (err) {
-    console.warn("tts error, fallback browser", err);
-    if (useCloudTts()) {
-      setStatus(`雲端 TTS 失敗，改用瀏覽器語音：${err.message || err}`);
+    console.warn("tts error", err);
+    state.cloudFailStreak += 1;
+    const msg = String(err?.message || err);
+    // Do NOT silently drop to iOS system TTS on first NotAllowedError
+    if (/NotAllowedError|not allowed|user didn't interact/i.test(msg)) {
+      setEngineBadge("正在用：需再點一次以啟用雲端語音");
+      setStatus("瀏覽器封鎖自動播放。請再點「朗讀」或段落一次以啟用雲端聲音。");
+      state.speaking = false;
+      updateToggleLabel();
+      return;
+    }
+    // Last resort only: browser TTS, and make it obvious
+    if (useCloudTts() && state.cloudFailStreak >= 1) {
+      setEngineBadge(engineLabel(null, null, true));
+      setStatus(`雲端 TTS 失敗，改用系統語音：${msg}`);
       try {
         await speakBrowserParagraph(text, token);
       } catch (e2) {
@@ -790,7 +880,7 @@ async function speakNext() {
         return;
       }
     } else {
-      setStatus(`朗讀失敗：${err.message || err}`);
+      setStatus(`朗讀失敗：${msg}`);
       state.speaking = false;
       updateToggleLabel();
       return;
@@ -809,6 +899,7 @@ function speakBrowserParagraph(text, token) {
       reject(new Error("此瀏覽器不支援語音合成"));
       return;
     }
+    setEngineBadge(engineLabel(null, null, true));
     pickZhTwFemaleVoice();
     // iOS quirk: cancel then speak in same turn
     try {
@@ -848,7 +939,7 @@ function speakBrowserParagraph(text, token) {
   });
 }
 
-async function speakCloudParagraph(text, token, plan) {
+async function fetchTtsAudio(text, plan) {
   const s = loadSettings();
   const headers = { "content-type": "application/json" };
   if (s.googleKey) headers["x-google-tts-key"] = s.googleKey;
@@ -876,46 +967,182 @@ async function speakCloudParagraph(text, token, plan) {
   const usedVoice = res.headers.get("x-tts-voice") || plan.voice;
   const usedProvider = res.headers.get("x-tts-provider") || plan.provider;
   const fallback = res.headers.get("x-tts-fallback");
-  const warnRaw = res.headers.get("x-tts-warning");
-  if (fallback) {
-    let warn = "Gemini 暫不可用，已改用 WaveNet";
-    try {
-      if (warnRaw) warn = decodeURIComponent(warnRaw);
-    } catch {
-      /* keep */
-    }
-    setStatus(`${warn}（${usedProvider} · ${usedVoice}）`);
+  const buf = await res.arrayBuffer();
+  if (!buf || buf.byteLength < 64) {
+    throw new Error("雲端 TTS 回傳音訊過短或空白");
   }
+  return { buf, usedVoice, usedProvider, fallback };
+}
+
+async function playViaWebAudio(arrayBuffer, token) {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) throw new Error("無 AudioContext");
+  state.audioCtx = state.audioCtx || new AC();
+  if (state.audioCtx.state === "suspended") {
+    await state.audioCtx.resume();
+  }
+  // copy — decodeAudioData may detach the buffer
+  const copy = arrayBuffer.slice(0);
+  const decoded = await state.audioCtx.decodeAudioData(copy);
   if (token !== state.ttsToken) return;
-  const blob = await res.blob();
-  const url = URL.createObjectURL(blob);
+  if (state.currentBufferSource) {
+    try {
+      state.currentBufferSource.stop(0);
+    } catch {
+      /* ignore */
+    }
+  }
+  const src = state.audioCtx.createBufferSource();
+  src.buffer = decoded;
+  // Approximate rate via playbackRate on source (AudioBufferSourceNode)
+  src.playbackRate.value = 1;
+  src.connect(state.audioCtx.destination);
+  state.currentBufferSource = src;
+  await new Promise((resolve, reject) => {
+    src.onended = () => {
+      if (state.currentBufferSource === src) state.currentBufferSource = null;
+      resolve();
+    };
+    try {
+      src.start(0);
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
+async function playViaHtmlAudio(arrayBuffer, token) {
   const audio = el.ttsAudio;
+  if (!audio) throw new Error("無 audio 元素");
+  const blob = new Blob([arrayBuffer], { type: "audio/mpeg" });
+  const url = URL.createObjectURL(blob);
   audio.src = url;
   audio.playbackRate = 1;
   state.currentAudio = audio;
   await new Promise((resolve, reject) => {
+    let settled = false;
     const clean = () => {
       URL.revokeObjectURL(url);
       audio.onended = null;
       audio.onerror = null;
     };
-    audio.onended = () => {
+    const done = (fn) => (ev) => {
+      if (settled) return;
+      settled = true;
+      clean();
+      fn(ev);
+    };
+    audio.onended = done(() => resolve());
+    audio.onerror = done(() => reject(new Error("HTMLAudio 播放失敗")));
+    if (token !== state.ttsToken) {
+      settled = true;
       clean();
       resolve();
-    };
-    audio.onerror = () => {
-      clean();
-      reject(new Error("音訊播放失敗"));
-    };
+      return;
+    }
     const p = audio.play();
     if (p && p.then) {
       p.catch((e) => {
+        if (settled) return;
+        settled = true;
         clean();
         reject(e);
       });
     }
   });
-  return { usedVoice, usedProvider, fallback };
+}
+
+async function playCloudBuffer(arrayBuffer, token) {
+  // iOS: Web Audio survives after user-gesture unlock better than HTMLAudio+blob
+  const preferWeb = isIOSLike() || !el.ttsAudio;
+  const errors = [];
+  if (preferWeb) {
+    try {
+      await playViaWebAudio(arrayBuffer, token);
+      return "webaudio";
+    } catch (e) {
+      errors.push(`WebAudio: ${e.message || e}`);
+    }
+    try {
+      await unlockAudio();
+      await playViaHtmlAudio(arrayBuffer, token);
+      return "html";
+    } catch (e) {
+      errors.push(`HTMLAudio: ${e.message || e}`);
+      throw new Error(errors.join("；"));
+    }
+  }
+  try {
+    await playViaHtmlAudio(arrayBuffer, token);
+    return "html";
+  } catch (e) {
+    errors.push(`HTMLAudio: ${e.message || e}`);
+    try {
+      await playViaWebAudio(arrayBuffer, token);
+      return "webaudio";
+    } catch (e2) {
+      errors.push(`WebAudio: ${e2.message || e2}`);
+      throw new Error(errors.join("；"));
+    }
+  }
+}
+
+/** Google (Leda→WaveNet server-side) → OpenAI → throw (caller may use browser last). */
+async function speakCloudWithFallback(text, token, plan) {
+  const s = loadSettings();
+  const attempts = [];
+  // Primary plan
+  attempts.push(plan);
+  // If primary is google/gemini, also queue OpenAI as cloud backup
+  if (
+    (plan.provider === "google" || plan.provider === "auto") &&
+    (s.openaiKey || serverTts.hasOpenAI)
+  ) {
+    attempts.push({
+      mode: "cloud",
+      provider: "openai",
+      voice: s.openaiVoice || "nova",
+      model: "tts-1",
+    });
+  }
+  // If primary is openai, queue google
+  if (plan.provider === "openai" && (s.googleKey || serverTts.hasGoogle)) {
+    attempts.push({
+      mode: "cloud",
+      provider: "google",
+      voice: "cmn-TW-Wavenet-A",
+      quality: "google-wavenet",
+    });
+  }
+
+  let lastErr = null;
+  for (const attempt of attempts) {
+    try {
+      setStatus(`雲端合成中（${attempt.provider}）…`);
+      const { buf, usedVoice, usedProvider, fallback } = await fetchTtsAudio(
+        text,
+        attempt,
+      );
+      if (token !== state.ttsToken) return;
+      setEngineBadge(engineLabel(usedProvider, usedVoice));
+      if (fallback) {
+        setStatus(`Gemini 暫不可用，改用 ${usedVoice}`);
+      } else {
+        setStatus(`朗讀中 · ${usedProvider} · ${usedVoice}`);
+      }
+      state.lastVoice = usedVoice;
+      await playCloudBuffer(buf, token);
+      return { usedVoice, usedProvider, fallback };
+    } catch (err) {
+      lastErr = err;
+      console.warn("cloud attempt failed", attempt.provider, err);
+    }
+  }
+  throw lastErr || new Error("雲端 TTS 全部失敗");
+}
+
+async function speakCloudParagraph(text, token, plan) {
+  return speakCloudWithFallback(text, token, plan);
 }
 
 async function pauseSpeech() {
@@ -923,8 +1150,20 @@ async function pauseSpeech() {
   state.paused = true;
   updateToggleLabel();
   try {
-    if (useCloudTts() && el.ttsAudio && !el.ttsAudio.paused) el.ttsAudio.pause();
-    else speechSynthesis.pause();
+    if (state.currentBufferSource) {
+      try {
+        state.currentBufferSource.stop(0);
+      } catch {
+        /* ignore */
+      }
+      state.currentBufferSource = null;
+      // Web Audio can't resume mid-buffer easily — restart paragraph on 繼續
+      state.speaking = true;
+    } else if (useCloudTts() && el.ttsAudio && !el.ttsAudio.paused) {
+      el.ttsAudio.pause();
+    } else {
+      speechSynthesis.pause();
+    }
   } catch {
     /* ignore */
   }
@@ -940,15 +1179,16 @@ async function resumeSpeech() {
   }
   state.paused = false;
   updateToggleLabel();
+  // Prefer restarting current paragraph so cloud path stays active on iOS
+  if (useCloudTts()) {
+    await speakFrom(state.speakFrom || 0);
+    return;
+  }
   try {
-    if (useCloudTts() && el.ttsAudio?.src) {
-      await el.ttsAudio.play();
-    } else {
-      speechSynthesis.resume();
-      if (!speechSynthesis.speaking && !speechSynthesis.pending) {
-        await speakFrom(state.speakFrom || 0);
-        return;
-      }
+    speechSynthesis.resume();
+    if (!speechSynthesis.speaking && !speechSynthesis.pending) {
+      await speakFrom(state.speakFrom || 0);
+      return;
     }
   } catch {
     await speakFrom(state.speakFrom || 0);

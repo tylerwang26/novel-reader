@@ -23,8 +23,20 @@
   <body>
     <div class="atmosphere" aria-hidden="true"></div>
     <!-- unlock helper audio (silent) -->
-    <audio id="unlock-audio" playsinline preload="auto" hidden></audio>
-    <audio id="tts-audio" playsinline preload="auto" hidden></audio>
+    <audio
+      id="unlock-audio"
+      playsinline
+      webkit-playsinline
+      preload="auto"
+      hidden
+    ></audio>
+    <audio
+      id="tts-audio"
+      playsinline
+      webkit-playsinline
+      preload="auto"
+      hidden
+    ></audio>
 
     <header class="site-header">
       <div class="brand">
@@ -86,6 +98,9 @@
           <p class="chapter-title" id="chapter-title"></p>
           <p class="progress-line" id="progress-line"></p>
           <p id="reader-status" class="reader-status" role="status"></p>
+          <p id="engine-badge" class="engine-badge" aria-live="polite">
+            語音引擎：偵測中…
+          </p>
         </div>
         <div class="reader-toolbar">
           <button type="button" id="btn-home" class="ghost">書單</button>
