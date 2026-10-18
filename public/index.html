@@ -2,12 +2,16 @@
 <html lang="zh-Hant">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
     <title>墨聲 · 小說朗讀</title>
     <meta
       name="description"
       content="貼上網址，用語音或指令朗讀網路小說。優先台灣口音女聲。"
     />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -18,6 +22,10 @@
   </head>
   <body>
     <div class="atmosphere" aria-hidden="true"></div>
+    <!-- unlock helper audio (silent) -->
+    <audio id="unlock-audio" playsinline preload="auto" hidden></audio>
+    <audio id="tts-audio" playsinline preload="auto" hidden></audio>
+
     <header class="site-header">
       <div class="brand">
         <span class="brand-mark" aria-hidden="true"></span>
@@ -27,6 +35,7 @@
         </div>
       </div>
       <nav class="header-actions">
+        <button type="button" id="btn-settings" class="ghost">設定</button>
         <button type="button" id="btn-chapters" class="ghost">章節</button>
         <button type="button" id="btn-mic" class="ghost" title="語音命令">
           語音
@@ -39,7 +48,7 @@
         <h1 class="hero-brand">墨聲</h1>
         <p class="hero-line">把目錄貼進來，從任意一章開始聽。</p>
         <p class="hero-sub">
-          預設支援《凡人修仙傳》。可說「從第 N 章開始唸」，或以文字指令操作。
+          可說或輸入「從第 N 章開始唸」「繼續唸」。進度會記住，並可用同步碼跨裝置。
         </p>
         <form id="toc-form" class="toc-form">
           <label class="sr-only" for="toc-url">小說目錄網址</label>
@@ -47,6 +56,7 @@
             id="toc-url"
             name="url"
             type="url"
+            inputmode="url"
             spellcheck="false"
             value="https://big5.quanben5.com/amp/n/fanrenxiuxianchuan/xiaoshuo.html"
             placeholder="貼上小說目錄網址"
@@ -58,11 +68,13 @@
         <section class="library" id="library" aria-label="最近閱讀">
           <div class="library-head">
             <h2>最近書單</h2>
-            <p class="library-hint">記住網站與進度（本機瀏覽器）</p>
+            <p class="library-hint">本機＋同步碼</p>
           </div>
           <div id="continue-banner" class="continue-banner" hidden></div>
           <ul id="library-list" class="library-list"></ul>
-          <p id="library-empty" class="library-empty" hidden>尚無紀錄。載入目錄後會自動記住。</p>
+          <p id="library-empty" class="library-empty" hidden>
+            尚無紀錄。載入目錄後會自動記住。
+          </p>
         </section>
       </section>
 
@@ -80,8 +92,7 @@
 
         <div class="transport" aria-label="朗讀控制">
           <button type="button" id="btn-prev" class="ghost">上一章</button>
-          <button type="button" id="btn-play" class="primary">朗讀</button>
-          <button type="button" id="btn-pause" class="ghost">暫停</button>
+          <button type="button" id="btn-toggle" class="primary">朗讀</button>
           <button type="button" id="btn-next" class="ghost">下一章</button>
           <label class="speed">
             速度
@@ -112,11 +123,13 @@
           <input
             id="cmd-input"
             type="text"
-            placeholder="文字指令：繼續唸／從第 10 章開始唸／暫停／下一章"
+            enterkeyhint="go"
+            placeholder="指令：從第 10 章開始唸／繼續唸／暫停／下一章"
             autocomplete="off"
           />
-          <button type="submit" class="ghost">執行</button>
+          <button type="submit" id="btn-cmd" class="primary">執行</button>
         </form>
+        <p id="mic-hint" class="mic-hint"></p>
 
         <article id="content" class="content" aria-live="polite"></article>
       </section>
@@ -129,12 +142,68 @@
       </div>
       <ol id="chapter-list" class="chapter-list"></ol>
     </aside>
+
+    <aside id="settings" class="drawer settings" hidden>
+      <div class="drawer-head">
+        <h2>設定</h2>
+        <button type="button" id="btn-close-settings" class="ghost">關閉</button>
+      </div>
+      <div class="settings-body">
+        <label class="field">
+          <span>朗讀引擎</span>
+          <select id="tts-engine">
+            <option value="auto">自動（有 Key 用 OpenAI，否則瀏覽器）</option>
+            <option value="openai">OpenAI TTS（較自然）</option>
+            <option value="browser">瀏覽器語音（離線／免費）</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>OpenAI API Key（僅存本機）</span>
+          <input
+            id="openai-key"
+            type="password"
+            autocomplete="off"
+            placeholder="sk-…"
+          />
+        </label>
+        <label class="field">
+          <span>OpenAI 聲音</span>
+          <select id="openai-voice">
+            <option value="nova">nova（建議，女聲）</option>
+            <option value="shimmer">shimmer（女聲）</option>
+            <option value="alloy">alloy</option>
+            <option value="echo">echo</option>
+            <option value="fable">fable</option>
+            <option value="onyx">onyx</option>
+          </select>
+        </label>
+        <hr />
+        <label class="field">
+          <span>進度同步碼</span>
+          <input id="sync-code" type="text" placeholder="例如 A3K9MP2Q" />
+        </label>
+        <div class="settings-actions">
+          <button type="button" id="btn-sync-push" class="primary">
+            上傳進度
+          </button>
+          <button type="button" id="btn-sync-pull" class="ghost">拉取進度</button>
+          <button type="button" id="btn-sync-copy" class="ghost">
+            複製書籤連結
+          </button>
+        </div>
+        <p class="settings-note">
+          OpenAI Key 只存在此裝置 localStorage，經本站 Worker 代理呼叫 TTS，不會寫進
+          Git。同步碼存在 Cloudflare KV，可跨手機／電腦還原書單與章節。
+        </p>
+      </div>
+    </aside>
+
     <div id="drawer-backdrop" class="backdrop" hidden></div>
 
     <footer class="site-footer">
       <p>
-        瀏覽器 TTS 優先 <code>zh-TW</code> 女聲 · 語音辨識 Web Speech API
-        · 正文經 Worker 代理即時抽取，不寫入倉庫
+        預設 OpenAI TTS（可選）＋瀏覽器 fallback · 進度：本機 IndexedDB／localStorage
+        ＋ KV 同步碼
       </p>
     </footer>
 

@@ -329,6 +329,57 @@ button {
   margin: 0 0 0.85rem;
 }
 
+.mic-hint {
+  margin: 0.2rem 0 0.8rem;
+  font-size: 0.86rem;
+  color: rgba(15, 42, 38, 0.62);
+}
+
+.settings .settings-body {
+  padding: 0.5rem 1.1rem 2rem;
+  overflow: auto;
+}
+
+.settings .field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-bottom: 0.9rem;
+  font-size: 0.92rem;
+}
+
+.settings .field input,
+.settings .field select {
+  border: 1px solid var(--line);
+  background: #fff;
+  border-radius: 10px;
+  padding: 0.7rem 0.85rem;
+  font: inherit;
+}
+
+.settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-bottom: 0.9rem;
+}
+
+.settings-note {
+  font-size: 0.84rem;
+  color: rgba(15, 42, 38, 0.62);
+  line-height: 1.55;
+}
+
+.settings hr {
+  border: none;
+  border-top: 1px solid var(--line);
+  margin: 0.4rem 0 1rem;
+}
+
+#btn-toggle {
+  min-width: 5.5rem;
+}
+
 .reader {
   animation: rise 0.55s ease both;
 }

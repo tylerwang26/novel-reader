@@ -9,6 +9,12 @@
     "not_found_handling": "single-page-application",
     "run_worker_first": ["/api/*"]
   },
+  "kv_namespaces": [
+    {
+      "binding": "PROGRESS",
+      "id": "44495cda6a8b4f49a89a3bb7e31ad5cf"
+    }
+  ],
   "observability": {
     "enabled": true,
     "logs": {

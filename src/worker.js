@@ -1,6 +1,5 @@
 /**
- * Novel Reader Worker — proxy + extract chapter HTML (quanben5 amp etc.)
- * Does not store novel body in the repo; fetches on demand with rate limits.
+ * Novel Reader Worker — proxy chapters + progress sync (KV) + OpenAI TTS proxy
  */
 
 const ALLOWED_HOSTS = new Set([
@@ -10,12 +9,14 @@ const ALLOWED_HOSTS = new Set([
 ]);
 
 const RATE_WINDOW_MS = 60_000;
-const RATE_MAX = 45;
+const RATE_MAX = 60;
 /** @type {Map<string, { count: number, reset: number }>} */
 const rateBuckets = new Map();
 
 const DEFAULT_TOC =
   "https://big5.quanben5.com/amp/n/fanrenxiuxianchuan/xiaoshuo.html";
+
+const SYNC_TTL_SECONDS = 60 * 60 * 24 * 180; // 180 days
 
 export default {
   async fetch(request, env) {
@@ -30,13 +31,26 @@ export default {
         if (limited) return cors(limited);
 
         if (url.pathname === "/api/health") {
-          return cors(json({ ok: true, service: "novel-reader" }));
+          return cors(
+            json({
+              ok: true,
+              service: "novel-reader",
+              kv: Boolean(env.PROGRESS),
+              tts: "openai-proxy+browser-fallback",
+            }),
+          );
         }
         if (url.pathname === "/api/toc") {
           return cors(await handleToc(url));
         }
         if (url.pathname === "/api/chapter") {
           return cors(await handleChapter(url));
+        }
+        if (url.pathname === "/api/sync") {
+          return cors(await handleSync(request, url, env));
+        }
+        if (url.pathname === "/api/tts") {
+          return cors(await handleTts(request, env));
         }
         return cors(json({ error: "找不到此 API" }, 404));
       } catch (err) {
@@ -63,11 +77,135 @@ function checkRate(request) {
   bucket.count += 1;
   if (bucket.count > RATE_MAX) {
     return json(
-      { error: "請求過於頻繁，請稍後再試（約每分鐘 45 次）" },
+      { error: "請求過於頻繁，請稍後再試（約每分鐘 60 次）" },
       429,
     );
   }
   return null;
+}
+
+async function handleSync(request, url, env) {
+  if (!env.PROGRESS) {
+    return json({ error: "PROGRESS KV 未綁定" }, 503);
+  }
+
+  if (request.method === "GET") {
+    const code = String(url.searchParams.get("code") || "")
+      .trim()
+      .toUpperCase();
+    if (!/^[A-Z0-9]{6,12}$/.test(code)) {
+      return json({ error: "同步碼格式不正確" }, 400);
+    }
+    const raw = await env.PROGRESS.get(`sync:${code}`);
+    if (!raw) return json({ error: "找不到此同步碼或已過期" }, 404);
+    const data = JSON.parse(raw);
+    return json({ ok: true, code, library: data });
+  }
+
+  if (request.method === "POST" || request.method === "PUT") {
+    const body = await request.json().catch(() => ({}));
+    const library = body.library;
+    if (!library || !Array.isArray(library.books)) {
+      return json({ error: "缺少 library.books" }, 400);
+    }
+    // size guard (~400KB)
+    const packed = JSON.stringify(library);
+    if (packed.length > 400_000) {
+      return json({ error: "進度資料過大" }, 413);
+    }
+    let code = String(body.code || "")
+      .trim()
+      .toUpperCase();
+    if (code && !/^[A-Z0-9]{6,12}$/.test(code)) {
+      return json({ error: "同步碼格式不正確" }, 400);
+    }
+    if (!code) code = randomCode(8);
+    await env.PROGRESS.put(`sync:${code}`, packed, {
+      expirationTtl: SYNC_TTL_SECONDS,
+    });
+    return json({ ok: true, code });
+  }
+
+  return json({ error: "Method not allowed" }, 405);
+}
+
+async function handleTts(request, env) {
+  if (request.method !== "POST") {
+    return json({ error: "POST only" }, 405);
+  }
+  const body = await request.json().catch(() => ({}));
+  const text = String(body.text || "").trim();
+  if (!text) return json({ error: "缺少 text" }, 400);
+  if (text.length > 2200) return json({ error: "單段文字過長" }, 400);
+
+  const key =
+    request.headers.get("x-openai-key") ||
+    env.OPENAI_API_KEY ||
+    "";
+  if (!key) {
+    return json(
+      {
+        error:
+          "未設定 OpenAI API Key。請在設定頁貼上 key，或對 Worker 設定 secret OPENAI_API_KEY。",
+        code: "NO_KEY",
+      },
+      400,
+    );
+  }
+
+  const voice = ["alloy", "echo", "fable", "onyx", "nova", "shimmer"].includes(
+    body.voice,
+  )
+    ? body.voice
+    : "nova";
+  const speed = Math.min(1.5, Math.max(0.75, Number(body.speed) || 1));
+  const model = body.model === "tts-1" ? "tts-1" : "tts-1-hd";
+
+  const upstream = await fetch("https://api.openai.com/v1/audio/speech", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${key}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model,
+      input: text,
+      voice,
+      speed,
+      response_format: "mp3",
+    }),
+  });
+
+  if (!upstream.ok) {
+    const errText = await upstream.text();
+    return json(
+      {
+        error: `OpenAI TTS 失敗（${upstream.status}）`,
+        detail: errText.slice(0, 300),
+      },
+      502,
+    );
+  }
+
+  return new Response(upstream.body, {
+    status: 200,
+    headers: {
+      "content-type": "audio/mpeg",
+      "cache-control": "no-store",
+      "access-control-allow-origin": "*",
+      "access-control-allow-headers": "content-type, x-openai-key",
+      "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
+    },
+  });
+}
+
+function randomCode(n) {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const bytes = new Uint8Array(n);
+  crypto.getRandomValues(bytes);
+  let s = "";
+  for (let i = 0; i < n; i++) s += alphabet[bytes[i] % alphabet.length];
+  return s;
 }
 
 async function handleToc(url) {
@@ -97,7 +235,6 @@ async function handleToc(url) {
     if (!href || !name) continue;
     if (!/\/n\/[^/]+\/\d+\.html/i.test(href)) continue;
     if (!/第.+章|序章|楔子|後記|番外|完結/.test(name) && !/^\d/.test(name)) {
-      // keep handbook etc. out of main list unless numbered chapter
       if (!/章/.test(name)) continue;
     }
     let abs;
@@ -111,7 +248,6 @@ async function handleToc(url) {
     chapters.push({ title: name, url: abs, index: chapters.length });
   }
 
-  // Prefer chapters that look like 「第N章」
   const numbered = chapters.filter((c) => /第.+章/.test(c.title));
   const list = numbered.length > 10 ? numbered : chapters;
   list.forEach((c, i) => {
@@ -140,8 +276,6 @@ async function handleChapter(url) {
     "本章";
 
   const paragraphs = extractParagraphs(html);
-  const content = paragraphs.join("\n\n");
-
   const base = new URL(pageUrl);
   const prev = findNav(html, base, /上一[章頁]/);
   const next = findNav(html, base, /下一[章頁]/);
@@ -151,7 +285,7 @@ async function handleChapter(url) {
     title: decodeHtml(stripTags(title)).trim(),
     url: pageUrl,
     paragraphs,
-    content,
+    content: paragraphs.join("\n\n"),
     prev,
     next,
     toc,
@@ -160,14 +294,13 @@ async function handleChapter(url) {
 
 function extractParagraphs(html) {
   let block =
-    matchOne(html, /<div class="wrapper">([\s\S]*?)<div class="footer/i) ||
+    matchOne(html, /<div class="wrapper">(.*?)<div class="footer/i) ||
     matchOne(html, /<div class="box_content">([\s\S]*?)<\/div>/i) ||
     matchOne(html, /<article[^>]*>([\s\S]*?)<\/article>/i) ||
     html;
 
   block = block.replace(/<script[\s\S]*?<\/script>/gi, "");
   block = block.replace(/<style[\s\S]*?<\/style>/gi, "");
-  // quanben censored glyphs as amp-img / [img=...]
   block = block.replace(/\[img=[^\]]+\]/gi, "");
   block = block.replace(/<amp-img[\s\S]*?<\/amp-img>/gi, "");
   block = block.replace(/<img[^>]*>/gi, "");
@@ -217,44 +350,38 @@ async function fetchText(pageUrl) {
     },
     redirect: "follow",
   });
-  if (!res.ok) {
-    throw new Error(`來源站回應 ${res.status}`);
-  }
+  if (!res.ok) throw new Error(`來源站回應 ${res.status}`);
   const buf = await res.arrayBuffer();
   return decodeBuffer(buf, res.headers.get("content-type") || "");
 }
 
 function decodeBuffer(buf, contentType) {
   const bytes = new Uint8Array(buf);
-  const metaCharset = (() => {
-    const head = new TextDecoder("utf-8", { fatal: false }).decode(
-      bytes.slice(0, 2048),
-    );
-    const m =
-      head.match(/charset\s*=\s*["']?([a-zA-Z0-9_-]+)/i) ||
-      contentType.match(/charset\s*=\s*([a-zA-Z0-9_-]+)/i);
-    return m ? m[1].toLowerCase() : "";
-  })();
-
+  const head = new TextDecoder("utf-8", { fatal: false }).decode(
+    bytes.slice(0, 2048),
+  );
+  const m =
+    head.match(/charset\s*=\s*["']?([a-zA-Z0-9_-]+)/i) ||
+    contentType.match(/charset\s*=\s*([a-zA-Z0-9_-]+)/i);
+  const metaCharset = m ? m[1].toLowerCase() : "";
   const order = [];
-  if (metaCharset.includes("big5") || metaCharset.includes("big-5")) {
-    order.push("big5");
-  } else if (metaCharset.includes("gb")) {
-    order.push("gbk");
-  }
+  if (metaCharset.includes("big5")) order.push("big5");
+  else if (metaCharset.includes("gb")) order.push("gbk");
   order.push("utf-8", "big5", "gbk");
-
   for (const enc of order) {
     try {
       const text = new TextDecoder(enc, { fatal: enc === "utf-8" }).decode(
         bytes,
       );
       if (enc !== "utf-8" || !text.includes("\uFFFD")) return text;
-      if (enc === "utf-8" && (text.match(/[\u4e00-\u9fff]/g) || []).length > 20) {
+      if (
+        enc === "utf-8" &&
+        (text.match(/[\u4e00-\u9fff]/g) || []).length > 20
+      ) {
         return text;
       }
     } catch {
-      /* try next */
+      /* next */
     }
   }
   return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
@@ -280,7 +407,7 @@ function json(data, status = 200) {
     status,
     headers: {
       "content-type": "application/json; charset=utf-8",
-      "cache-control": status === 200 ? "public, max-age=120" : "no-store",
+      "cache-control": status === 200 ? "public, max-age=60" : "no-store",
     },
   });
 }
@@ -288,8 +415,11 @@ function json(data, status = 200) {
 function cors(res) {
   const headers = new Headers(res.headers);
   headers.set("access-control-allow-origin", "*");
-  headers.set("access-control-allow-methods", "GET, OPTIONS");
-  headers.set("access-control-allow-headers", "content-type");
+  headers.set("access-control-allow-methods", "GET, POST, PUT, OPTIONS");
+  headers.set(
+    "access-control-allow-headers",
+    "content-type, x-openai-key",
+  );
   return new Response(res.body, { status: res.status, headers });
 }
 
