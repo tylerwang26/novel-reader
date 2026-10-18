@@ -1,3 +1,8 @@
+## 線上
+
+- App: https://novel-reader.tylerwang26.workers.dev
+- Repo: https://github.com/tylerwang26/novel-reader
+
 # 墨聲 · novel-reader
 
 貼上小說目錄網址，用語音或文字指令朗讀正文。預設支援全本小說網《凡人修仙傳》AMP 目錄。
