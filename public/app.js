@@ -1456,6 +1456,34 @@ function bindUi() {
     }
   });
 
+  document.getElementById("btn-tts-preview")?.addEventListener("click", async () => {
+    try {
+      await unlockAudio();
+      setStatus("試聽中…");
+      const plan = resolveTtsPlan();
+      const sample =
+        plan.provider === "openai"
+          ? "你好，這是墨聲語音試聽。"
+          : "你好，這是墨聲台灣口音試聽。";
+      const previewPlan =
+        plan.mode === "cloud"
+          ? plan
+          : {
+              mode: "cloud",
+              provider: "google",
+              voice: loadSettings().googleVoice || "cmn-TW-Wavenet-A",
+            };
+      state.ttsToken += 1;
+      const token = state.ttsToken;
+      await speakCloudParagraph(sample, token, previewPlan);
+      setStatus(
+        `試聽完成（${previewPlan.provider || "auto"} · ${previewPlan.voice || "default"}）`,
+      );
+    } catch (err) {
+      setStatus(`試聽失敗：${err.message || err}`);
+    }
+  });
+
   el.ttsEngine?.addEventListener("change", () =>
     saveSettings({ ttsEngine: el.ttsEngine.value }),
   );

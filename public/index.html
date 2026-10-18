@@ -174,12 +174,12 @@
           </select>
         </label>
         <label class="field">
-          <span>Google TTS API Key（僅存本機）</span>
+          <span>Google TTS API Key（可選·覆寫站內 secret）</span>
           <input
             id="google-key"
             type="password"
             autocomplete="off"
-            placeholder="AIza…"
+            placeholder="留空＝使用站內已綁定的 Key"
           />
         </label>
         <label class="field">
@@ -193,6 +193,11 @@
             <option value="cmn-TW-Standard-C">Standard-C（女）</option>
           </select>
         </label>
+        <div class="settings-actions">
+          <button type="button" id="btn-tts-preview" class="primary">
+            試聽台灣口音
+          </button>
+        </div>
         <label class="field">
           <span>OpenAI API Key（僅存本機）</span>
           <input
@@ -235,9 +240,8 @@
           </button>
         </div>
         <p class="settings-note">
-          進度預設自動上傳到 Cloudflare KV（讀者 ID）。Key 只存本機
-          localStorage，也可改用 <code>wrangler secret put GOOGLE_TTS_API_KEY</code>
-          ／<code>OPENAI_API_KEY</code>。預設朗讀：Google WaveNet
+          進度預設自動上傳到 Cloudflare KV（讀者 ID）。正式站已綁定 Google TTS
+          secret，預設無需貼 Key；設定欄僅供本機覆寫。預設朗讀：Google WaveNet
           <code>cmn-TW-Wavenet-A</code>。
         </p>
       </div>
