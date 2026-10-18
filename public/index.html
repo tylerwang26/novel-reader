@@ -84,6 +84,7 @@
           <p class="book-title" id="book-title"></p>
           <p class="chapter-title" id="chapter-title"></p>
           <p class="progress-line" id="progress-line"></p>
+          <p id="reader-status" class="reader-status" role="status"></p>
         </div>
         <div class="reader-toolbar">
           <button type="button" id="btn-home" class="ghost">書單</button>
@@ -155,7 +156,7 @@
             <option value="auto">
               自動（Google 台灣口音 → OpenAI → 瀏覽器）
             </option>
-            <option value="google">Google WaveNet／Standard（台灣口音）</option>
+            <option value="google">Google Gemini／WaveNet（台灣華語）</option>
             <option value="openai">OpenAI TTS（華語流利，非台灣腔）</option>
             <option value="browser">瀏覽器語音（離線／免費）</option>
           </select>
@@ -163,12 +164,11 @@
         <label class="field">
           <span>語音品質</span>
           <select id="tts-quality">
-            <option value="google-wavenet">
-              Google WaveNet cmn-TW（預設·最划算且夠流利）
+            <option value="gemini-flash">
+              Gemini 3.1 Flash TTS（預設·試聽頁 Leda）
             </option>
-            <option value="google-standard">
-              Google Standard cmn-TW（更便宜）
-            </option>
+            <option value="google-wavenet">Google WaveNet cmn-TW</option>
+            <option value="google-standard">Google Standard cmn-TW</option>
             <option value="openai-tts-1">OpenAI tts-1</option>
             <option value="openai-tts-1-hd">OpenAI tts-1-hd（更高品質）</option>
           </select>
@@ -183,28 +183,49 @@
           />
         </label>
         <label class="field">
-          <span>Google 聲音</span>
+          <span>朗讀聲音（女聲優先）</span>
           <select id="google-voice">
-            <option value="cmn-TW-Wavenet-A">Wavenet-A（女·預設）</option>
-            <option value="cmn-TW-Wavenet-B">Wavenet-B（男）</option>
-            <option value="cmn-TW-Wavenet-C">Wavenet-C（女）</option>
-            <option value="cmn-TW-Standard-A">Standard-A（女·較便宜）</option>
-            <option value="cmn-TW-Standard-B">Standard-B（男）</option>
-            <option value="cmn-TW-Standard-C">Standard-C（女）</option>
+            <optgroup label="Gemini 3.1 Flash TTS · 台灣華語女聲">
+              <option value="Leda">Leda（Youthful·預設）</option>
+              <option value="Aoede">Aoede（Breezy）</option>
+              <option value="Kore">Kore（Firm）</option>
+              <option value="Callirrhoe">Callirrhoe（Easy-going）</option>
+              <option value="Autonoe">Autonoe（Bright）</option>
+              <option value="Despina">Despina（Smooth）</option>
+              <option value="Erinome">Erinome（Clear）</option>
+              <option value="Gacrux">Gacrux（Mature）</option>
+              <option value="Laomedeia">Laomedeia（Upbeat）</option>
+              <option value="Pulcherrima">Pulcherrima（Forward）</option>
+              <option value="Sulafat">Sulafat（Warm）</option>
+              <option value="Vindemiatrix">Vindemiatrix（Gentle）</option>
+              <option value="Zephyr">Zephyr（Bright）</option>
+              <option value="Achernar">Achernar（Soft）</option>
+            </optgroup>
+            <optgroup label="WaveNet／Standard · cmn-TW">
+              <option value="cmn-TW-Wavenet-A">Wavenet-A（女）</option>
+              <option value="cmn-TW-Wavenet-C">Wavenet-C（女）</option>
+              <option value="cmn-TW-Standard-A">Standard-A（女）</option>
+              <option value="cmn-TW-Standard-C">Standard-C（女）</option>
+              <option value="cmn-TW-Wavenet-B">Wavenet-B（男）</option>
+              <option value="cmn-TW-Standard-B">Standard-B（男）</option>
+            </optgroup>
           </select>
         </label>
         <div class="settings-actions">
           <button type="button" id="btn-tts-preview" class="primary">
             試聽台灣口音
           </button>
+          <button type="button" id="btn-back-reader" class="ghost">
+            回到小說
+          </button>
         </div>
         <label class="field">
-          <span>OpenAI API Key（僅存本機）</span>
+          <span>OpenAI API Key（可選·覆寫站內 secret）</span>
           <input
             id="openai-key"
             type="password"
             autocomplete="off"
-            placeholder="sk-…"
+            placeholder="留空＝使用站內已綁定的 Key"
           />
         </label>
         <label class="field">
@@ -240,9 +261,9 @@
           </button>
         </div>
         <p class="settings-note">
-          進度預設自動上傳到 Cloudflare KV（讀者 ID）。正式站已綁定 Google TTS
-          secret，預設無需貼 Key；設定欄僅供本機覆寫。預設朗讀：Google WaveNet
-          <code>cmn-TW-Wavenet-A</code>。
+          進度預設自動上傳到 Cloudflare KV。正式站已綁定 Google TTS secret。預設：
+          Gemini 3.1 Flash TTS · <code>Leda</code>（台灣華語）。若專案尚未啟用
+          Vertex AI，會自動改用 WaveNet。試聽後可按「回到小說」或關閉設定。
         </p>
       </div>
     </aside>
@@ -251,7 +272,7 @@
 
     <footer class="site-footer">
       <p>
-        預設 Google WaveNet 台灣口音 · 進度自動同步 Cloudflare KV · 瀏覽器 fallback
+        預設 Gemini Flash TTS · Leda · 進度自動同步 Cloudflare KV
       </p>
     </footer>
 

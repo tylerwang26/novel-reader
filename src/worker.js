@@ -37,10 +37,13 @@ export default {
               service: "novel-reader",
               kv: Boolean(env.PROGRESS),
               tts: {
-                default: "google-wavenet-cmn-TW",
+                default: "gemini-3.1-flash-tts-preview/Leda",
+                language: "cmn-TW",
                 providers: ["google", "openai", "browser"],
                 hasGoogle: Boolean(env.GOOGLE_TTS_API_KEY),
                 hasOpenAI: Boolean(env.OPENAI_API_KEY),
+                geminiModel: "gemini-3.1-flash-tts-preview",
+                geminiDefaultVoice: "Leda",
               },
             }),
           );
@@ -172,6 +175,32 @@ async function handleSync(request, url, env) {
   return json({ error: "Method not allowed" }, 405);
 }
 
+const GEMINI_TTS_MODEL = "gemini-3.1-flash-tts-preview";
+const GEMINI_FEMALE = [
+  "Leda",
+  "Aoede",
+  "Kore",
+  "Callirrhoe",
+  "Autonoe",
+  "Despina",
+  "Erinome",
+  "Gacrux",
+  "Laomedeia",
+  "Pulcherrima",
+  "Sulafat",
+  "Vindemiatrix",
+  "Zephyr",
+  "Achernar",
+];
+const WAVENET_VOICES = [
+  "cmn-TW-Wavenet-A",
+  "cmn-TW-Wavenet-B",
+  "cmn-TW-Wavenet-C",
+  "cmn-TW-Standard-A",
+  "cmn-TW-Standard-B",
+  "cmn-TW-Standard-C",
+];
+
 async function handleTts(request, env) {
   if (request.method !== "POST") {
     return json({ error: "POST only" }, 405);
@@ -196,7 +225,7 @@ async function handleTts(request, env) {
       return json(
         {
           error:
-            "未設定雲端 TTS Key。預設建議 Google WaveNet cmn-TW（最便宜且台灣口音）。請在設定貼上 Google TTS API Key，或 wrangler secret put GOOGLE_TTS_API_KEY。",
+            "未設定雲端 TTS Key。預設 Gemini 3.1 Flash TTS · Leda（台灣華語）。請綁定 GOOGLE_TTS_API_KEY。",
           code: "NO_KEY",
           recommend: "google",
         },
@@ -205,13 +234,41 @@ async function handleTts(request, env) {
     }
   }
 
-  if (provider === "google") {
+  if (provider === "google" || provider === "gemini") {
     return await ttsGoogle(text, speed, body, googleKey);
   }
   if (provider === "openai") {
     return await ttsOpenAi(text, speed, body, openaiKey);
   }
   return json({ error: `未知 provider：${provider}` }, 400);
+}
+
+function bodyVoiceSafe(v) {
+  return String(v || "");
+}
+
+function resolveGooglePlan(body) {
+  const voice = bodyVoiceSafe(body.voice);
+  const quality = String(body.quality || body.model || "").toLowerCase();
+  const wantGemini =
+    quality.includes("gemini") ||
+    GEMINI_FEMALE.includes(voice) ||
+    (!WAVENET_VOICES.includes(voice) && !quality.includes("wavenet") && !quality.includes("standard"));
+
+  if (WAVENET_VOICES.includes(voice) || quality.includes("wavenet") || quality.includes("standard")) {
+    return {
+      mode: "wavenet",
+      voice: WAVENET_VOICES.includes(voice) ? voice : "cmn-TW-Wavenet-A",
+    };
+  }
+  if (wantGemini || !voice) {
+    return {
+      mode: "gemini",
+      voice: GEMINI_FEMALE.includes(voice) ? voice : "Leda",
+      model: GEMINI_TTS_MODEL,
+    };
+  }
+  return { mode: "wavenet", voice: "cmn-TW-Wavenet-A" };
 }
 
 async function ttsGoogle(text, speed, body, key) {
@@ -225,17 +282,118 @@ async function ttsGoogle(text, speed, body, key) {
       400,
     );
   }
-  const voiceName = [
-    "cmn-TW-Wavenet-A",
-    "cmn-TW-Wavenet-B",
-    "cmn-TW-Wavenet-C",
-    "cmn-TW-Standard-A",
-    "cmn-TW-Standard-B",
-    "cmn-TW-Standard-C",
-  ].includes(body.voice)
-    ? body.voice
-    : "cmn-TW-Wavenet-A";
 
+  const plan = resolveGooglePlan(body);
+  const allowFallback = body.fallback !== false;
+
+  if (plan.mode === "gemini") {
+    const geminiRes = await ttsGeminiCloud(text, speed, plan.voice, key);
+    if (geminiRes.ok) return geminiRes.response;
+    if (allowFallback) {
+      const wave = await ttsWavenet(
+        text,
+        speed,
+        "cmn-TW-Wavenet-A",
+        key,
+        {
+          "x-tts-fallback": "wavenet",
+          "x-tts-warning": encodeURIComponent(
+            geminiRes.userMessage || "Gemini TTS 不可用，已改用 WaveNet",
+          ),
+        },
+      );
+      if (wave.ok) return wave.response;
+    }
+    return json(
+      {
+        error: geminiRes.userMessage || "Gemini TTS 失敗",
+        code: geminiRes.code || "GEMINI_FAIL",
+        detail: geminiRes.detail?.slice(0, 500),
+        enableHint:
+          "請在 Google Cloud 專案啟用 Vertex AI API（aiplatform.googleapis.com），Gemini-TTS 經 Cloud Text-to-Speech 需此權限。WaveNet 仍可用。",
+      },
+      geminiRes.status || 502,
+    );
+  }
+
+  const wave = await ttsWavenet(text, speed, plan.voice, key);
+  if (wave.ok) return wave.response;
+  return json(
+    {
+      error: wave.userMessage || "Google TTS 失敗",
+      detail: wave.detail?.slice(0, 400),
+    },
+    wave.status || 502,
+  );
+}
+
+async function ttsGeminiCloud(text, speed, voiceName, key) {
+  const voice = GEMINI_FEMALE.includes(voiceName) ? voiceName : "Leda";
+  const prompt =
+    "用自然、流利的台灣國語（華語台灣口音）女聲朗讀小說正文，語氣溫柔沉穩、清晰好懂，不要英文腔。";
+
+  const upstream = await fetch(
+    `https://texttospeech.googleapis.com/v1/text:synthesize?key=${encodeURIComponent(key)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        input: { text, prompt },
+        voice: {
+          languageCode: "cmn-TW",
+          name: voice,
+          modelName: GEMINI_TTS_MODEL,
+        },
+        audioConfig: {
+          audioEncoding: "MP3",
+          speakingRate: speed,
+        },
+      }),
+    },
+  );
+
+  const errText = upstream.ok ? "" : await upstream.text();
+  if (!upstream.ok) {
+    let code = "GEMINI_FAIL";
+    let userMessage = `Gemini TTS 失敗（${upstream.status}）`;
+    if (/aiplatform\.googleapis\.com|Agent Platform API/i.test(errText)) {
+      code = "VERTEX_AI_DISABLED";
+      userMessage =
+        "Gemini TTS 需要啟用 Vertex AI API（aiplatform.googleapis.com）。請到 Google Cloud Console 為此專案啟用後再試。";
+    } else if (/PERMISSION_DENIED|API_KEY_SERVICE_BLOCKED/i.test(errText)) {
+      code = "API_BLOCKED";
+      userMessage = "此 API Key 未授權 Gemini／Vertex TTS，請檢查金鑰限制與 API 啟用狀態。";
+    }
+    return { ok: false, status: upstream.status, code, userMessage, detail: errText };
+  }
+
+  const data = await upstream.json();
+  if (!data.audioContent) {
+    return {
+      ok: false,
+      status: 502,
+      code: "NO_AUDIO",
+      userMessage: "Gemini TTS 未回傳 audioContent",
+    };
+  }
+  const bin = Uint8Array.from(atob(data.audioContent), (c) => c.charCodeAt(0));
+  return {
+    ok: true,
+    response: new Response(bin, {
+      status: 200,
+      headers: ttsHeaders({
+        "x-tts-provider": "gemini",
+        "x-tts-model": GEMINI_TTS_MODEL,
+        "x-tts-voice": voice,
+      }),
+    }),
+  };
+}
+
+async function ttsWavenet(text, speed, voiceName, key, extraHeaders = {}) {
+  const voice = WAVENET_VOICES.includes(voiceName)
+    ? voiceName
+    : "cmn-TW-Wavenet-A";
   const upstream = await fetch(
     `https://texttospeech.googleapis.com/v1/text:synthesize?key=${encodeURIComponent(key)}`,
     {
@@ -245,7 +403,7 @@ async function ttsGoogle(text, speed, body, key) {
         input: { text },
         voice: {
           languageCode: "cmn-TW",
-          name: voiceName,
+          name: voice,
         },
         audioConfig: {
           audioEncoding: "MP3",
@@ -256,23 +414,29 @@ async function ttsGoogle(text, speed, body, key) {
   );
   if (!upstream.ok) {
     const errText = await upstream.text();
-    return json(
-      {
-        error: `Google TTS 失敗（${upstream.status}）`,
-        detail: errText.slice(0, 400),
-      },
-      502,
-    );
+    return {
+      ok: false,
+      status: upstream.status,
+      userMessage: `Google WaveNet 失敗（${upstream.status}）`,
+      detail: errText,
+    };
   }
   const data = await upstream.json();
   if (!data.audioContent) {
-    return json({ error: "Google TTS 未回傳 audioContent" }, 502);
+    return { ok: false, status: 502, userMessage: "WaveNet 未回傳 audioContent" };
   }
   const bin = Uint8Array.from(atob(data.audioContent), (c) => c.charCodeAt(0));
-  return new Response(bin, {
-    status: 200,
-    headers: ttsHeaders({ "x-tts-provider": "google", "x-tts-voice": voiceName }),
-  });
+  return {
+    ok: true,
+    response: new Response(bin, {
+      status: 200,
+      headers: ttsHeaders({
+        "x-tts-provider": "google",
+        "x-tts-voice": voice,
+        ...extraHeaders,
+      }),
+    }),
+  };
 }
 
 async function ttsOpenAi(text, speed, body, key) {

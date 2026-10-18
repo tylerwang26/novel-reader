@@ -61,10 +61,31 @@ const el = {
   syncCode: document.getElementById("sync-code"),
   unlockAudio: document.getElementById("unlock-audio"),
   ttsAudio: document.getElementById("tts-audio"),
+  readerStatus: document.getElementById("reader-status"),
+  btnBackReader: document.getElementById("btn-back-reader"),
 };
 
+const GEMINI_FEMALE = new Set([
+  "Leda",
+  "Aoede",
+  "Kore",
+  "Callirrhoe",
+  "Autonoe",
+  "Despina",
+  "Erinome",
+  "Gacrux",
+  "Laomedeia",
+  "Pulcherrima",
+  "Sulafat",
+  "Vindemiatrix",
+  "Zephyr",
+  "Achernar",
+]);
+
 function setStatus(msg) {
-  if (el.status) el.status.textContent = msg || "";
+  const text = msg || "";
+  if (el.status) el.status.textContent = text;
+  if (el.readerStatus) el.readerStatus.textContent = text;
 }
 
 function updateToggleLabel() {
@@ -100,9 +121,9 @@ function randomReaderId(n = 12) {
 function defaultSettings() {
   return {
     ttsEngine: "auto",
-    ttsQuality: "google-wavenet",
+    ttsQuality: "gemini-flash",
     googleKey: "",
-    googleVoice: "cmn-TW-Wavenet-A",
+    googleVoice: "Leda",
     openaiKey: "",
     openaiVoice: "nova",
     readerId: "",
@@ -136,13 +157,33 @@ function ensureReaderId() {
   return id;
 }
 
+function migrateVoiceDefaults(s) {
+  // Older installs defaulted to WaveNet-A; promote to Gemini Leda once.
+  if (
+    (!s.ttsQuality || s.ttsQuality === "google-wavenet") &&
+    (!s.googleVoice || s.googleVoice === "cmn-TW-Wavenet-A") &&
+    !s.voiceMigratedToLeda
+  ) {
+    return saveSettings({
+      ttsQuality: "gemini-flash",
+      googleVoice: "Leda",
+      voiceMigratedToLeda: true,
+    });
+  }
+  return s;
+}
+
 function fillSettingsForm() {
-  const s = loadSettings();
+  let s = migrateVoiceDefaults(loadSettings());
   const readerId = ensureReaderId();
   if (el.ttsEngine) el.ttsEngine.value = s.ttsEngine || "auto";
-  if (el.ttsQuality) el.ttsQuality.value = s.ttsQuality || "google-wavenet";
+  if (el.ttsQuality) el.ttsQuality.value = s.ttsQuality || "gemini-flash";
   if (el.googleKey) el.googleKey.value = s.googleKey || "";
-  if (el.googleVoice) el.googleVoice.value = s.googleVoice || "cmn-TW-Wavenet-A";
+  if (el.googleVoice) {
+    const v = s.googleVoice || "Leda";
+    el.googleVoice.value = v;
+    if (el.googleVoice.value !== v) el.googleVoice.value = "Leda";
+  }
   if (el.openaiKey) el.openaiKey.value = s.openaiKey || "";
   if (el.openaiVoice) el.openaiVoice.value = s.openaiVoice || "nova";
   if (el.readerId) el.readerId.value = readerId;
@@ -505,24 +546,39 @@ async function refreshServerTts() {
   serverTts.loaded = true;
 }
 
+function resolveGoogleVoice(s, quality) {
+  const v = s.googleVoice || "Leda";
+  if (quality === "google-standard") {
+    if (v.startsWith("cmn-TW-")) return v.replace("Wavenet", "Standard");
+    return "cmn-TW-Standard-A";
+  }
+  if (quality === "google-wavenet") {
+    if (v.startsWith("cmn-TW-")) return v.replace("Standard", "Wavenet");
+    return "cmn-TW-Wavenet-A";
+  }
+  // gemini-flash (default): keep Gemini female names; map WaveNet picks to Leda
+  if (GEMINI_FEMALE.has(v)) return v;
+  return "Leda";
+}
+
 function resolveTtsPlan() {
   const s = loadSettings();
   const engine = s.ttsEngine || "auto";
-  const quality = s.ttsQuality || "google-wavenet";
+  const quality = s.ttsQuality || "gemini-flash";
   const hasGoogle = Boolean(s.googleKey) || serverTts.hasGoogle;
   const hasOpenAi = Boolean(s.openaiKey) || serverTts.hasOpenAI;
-
-  const googleVoice =
-    quality === "google-standard"
-      ? (s.googleVoice || "cmn-TW-Standard-A").replace("Wavenet", "Standard")
-      : s.googleVoice || "cmn-TW-Wavenet-A";
+  const googleVoice = resolveGoogleVoice(s, quality);
   const openaiModel = quality === "openai-tts-1-hd" ? "tts-1-hd" : "tts-1";
 
   if (engine === "browser") return { mode: "browser" };
 
   if (engine === "google") {
-    // Try cloud even without local key (Worker secret may exist)
-    return { mode: "cloud", provider: "google", voice: googleVoice };
+    return {
+      mode: "cloud",
+      provider: "google",
+      voice: googleVoice,
+      quality,
+    };
   }
   if (engine === "openai") {
     return {
@@ -533,9 +589,13 @@ function resolveTtsPlan() {
     };
   }
 
-  // auto: prefer Google TW WaveNet when any Google path exists, else OpenAI, else try Google then browser fallback
-  if (hasGoogle || quality.startsWith("google")) {
-    return { mode: "cloud", provider: "google", voice: googleVoice };
+  if (hasGoogle || quality.startsWith("google") || quality.startsWith("gemini")) {
+    return {
+      mode: "cloud",
+      provider: "google",
+      voice: googleVoice,
+      quality,
+    };
   }
   if (hasOpenAi || quality.startsWith("openai")) {
     return {
@@ -545,8 +605,12 @@ function resolveTtsPlan() {
       model: openaiModel,
     };
   }
-  // No known keys — still try Google first (Worker may have secret); speakNext falls back to browser
-  return { mode: "cloud", provider: "auto", voice: googleVoice };
+  return {
+    mode: "cloud",
+    provider: "google",
+    voice: googleVoice,
+    quality: "gemini-flash",
+  };
 }
 
 function useCloudTts() {
@@ -746,6 +810,7 @@ async function speakCloudParagraph(text, token, plan) {
     text,
     provider: plan.provider || "auto",
     voice: plan.voice,
+    quality: plan.quality,
     speed: state.rate,
   };
   if (plan.provider === "openai") body.model = plan.model || "tts-1";
@@ -757,7 +822,21 @@ async function speakCloudParagraph(text, token, plan) {
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    throw new Error(err.error || `TTS HTTP ${res.status}`);
+    const hint = err.enableHint ? ` ${err.enableHint}` : "";
+    throw new Error((err.error || `TTS HTTP ${res.status}`) + hint);
+  }
+  const usedVoice = res.headers.get("x-tts-voice") || plan.voice;
+  const usedProvider = res.headers.get("x-tts-provider") || plan.provider;
+  const fallback = res.headers.get("x-tts-fallback");
+  const warnRaw = res.headers.get("x-tts-warning");
+  if (fallback) {
+    let warn = "Gemini 暫不可用，已改用 WaveNet";
+    try {
+      if (warnRaw) warn = decodeURIComponent(warnRaw);
+    } catch {
+      /* keep */
+    }
+    setStatus(`${warn}（${usedProvider} · ${usedVoice}）`);
   }
   if (token !== state.ttsToken) return;
   const blob = await res.blob();
@@ -788,6 +867,7 @@ async function speakCloudParagraph(text, token, plan) {
       });
     }
   });
+  return { usedVoice, usedProvider, fallback };
 }
 
 async function pauseSpeech() {
@@ -1357,21 +1437,53 @@ function openDrawer() {
   el.settings.hidden = true;
   el.drawer.hidden = false;
   el.backdrop.hidden = false;
+  document.body.classList.add("panel-open");
 }
 function openSettings() {
   fillSettingsForm();
   el.drawer.hidden = true;
   el.settings.hidden = false;
   el.backdrop.hidden = false;
+  document.body.classList.add("panel-open");
 }
 function closePanels() {
   el.drawer.hidden = true;
   el.settings.hidden = true;
   el.backdrop.hidden = true;
+  document.body.classList.remove("panel-open");
+}
+
+function returnToReader() {
+  closePanels();
+  // Keep novel content visible; restore reader if a book is loaded
+  if (state.book) {
+    el.setup.hidden = true;
+    el.reader.hidden = false;
+    if (state.chapter && el.content && !el.content.children.length) {
+      // content was cleared unexpectedly — re-render paragraphs
+      renderParagraphs(state.paragraphs || []);
+    }
+    setStatus("已回到小說內容。可繼續朗讀。");
+  } else {
+    el.reader.hidden = true;
+    el.setup.hidden = false;
+    setStatus("已關閉設定。");
+  }
+}
+
+function renderParagraphs(paragraphs) {
+  if (!el.content) return;
+  el.content.innerHTML = "";
+  for (const p of paragraphs) {
+    const node = document.createElement("p");
+    node.textContent = p;
+    el.content.appendChild(node);
+  }
 }
 
 function goHome() {
   stopSpeech();
+  closePanels();
   el.reader.hidden = true;
   el.setup.hidden = false;
   renderLibrary();
@@ -1406,8 +1518,15 @@ function bindUi() {
     .addEventListener("click", closePanels);
   document
     .getElementById("btn-close-settings")
-    .addEventListener("click", closePanels);
-  el.backdrop.addEventListener("click", closePanels);
+    .addEventListener("click", returnToReader);
+  el.backdrop.addEventListener("click", returnToReader);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") returnToReader();
+  });
+  el.btnBackReader?.addEventListener("click", (e) => {
+    e.preventDefault();
+    returnToReader();
+  });
 
   document.getElementById("btn-home").addEventListener("click", goHome);
   document.getElementById("btn-resume").addEventListener("click", async () => {
@@ -1457,30 +1576,54 @@ function bindUi() {
   });
 
   document.getElementById("btn-tts-preview")?.addEventListener("click", async () => {
+    const btn = document.getElementById("btn-tts-preview");
     try {
       await unlockAudio();
+      if (btn) btn.disabled = true;
       setStatus("試聽中…");
+      // Snapshot reader visibility so we can restore after preview
+      const hadBook = Boolean(state.book);
+      const readerWasOpen = el.reader && !el.reader.hidden;
       const plan = resolveTtsPlan();
-      const sample =
-        plan.provider === "openai"
-          ? "你好，這是墨聲語音試聽。"
-          : "你好，這是墨聲台灣口音試聽。";
+      const sample = "你好，這是墨聲台灣口音試聽。用自然的台灣國語朗讀小說。";
       const previewPlan =
         plan.mode === "cloud"
           ? plan
           : {
               mode: "cloud",
               provider: "google",
-              voice: loadSettings().googleVoice || "cmn-TW-Wavenet-A",
+              voice: loadSettings().googleVoice || "Leda",
+              quality: "gemini-flash",
             };
+      // Bump token for preview only — do not clear chapter DOM
       state.ttsToken += 1;
       const token = state.ttsToken;
-      await speakCloudParagraph(sample, token, previewPlan);
-      setStatus(
-        `試聽完成（${previewPlan.provider || "auto"} · ${previewPlan.voice || "default"}）`,
-      );
+      state.speaking = false;
+      state.paused = false;
+      updateToggleLabel();
+      const meta = await speakCloudParagraph(sample, token, previewPlan);
+      const label = meta?.usedVoice || previewPlan.voice || "Leda";
+      const prov = meta?.usedProvider || "google";
+      setStatus(`試聽完成（${prov} · ${label}）。正在回到小說…`);
+      // Always restore novel surface after preview
+      if (hadBook || readerWasOpen) {
+        returnToReader();
+        setStatus(`試聽完成（${prov} · ${label}）。可繼續朗讀。`);
+      }
+      // Preview leaves transport idle; user taps 朗讀 to continue
+      state.speaking = false;
+      state.paused = false;
+      updateToggleLabel();
     } catch (err) {
       setStatus(`試聽失敗：${err.message || err}`);
+      // Still allow leaving settings
+      if (state.book) {
+        // keep settings open so user can read the error, but ensure reader DOM intact
+        el.reader.hidden = false;
+        el.setup.hidden = true;
+      }
+    } finally {
+      if (btn) btn.disabled = false;
     }
   });
 
@@ -1491,13 +1634,25 @@ function bindUi() {
     const q = el.ttsQuality.value;
     const patch = { ttsQuality: q };
     if (q === "google-standard" && el.googleVoice) {
-      const v = (el.googleVoice.value || "").replace("Wavenet", "Standard");
+      const cur = el.googleVoice.value || "";
+      const v = cur.startsWith("cmn-TW-")
+        ? cur.replace("Wavenet", "Standard")
+        : "cmn-TW-Standard-A";
       el.googleVoice.value = v;
       patch.googleVoice = v;
     } else if (q === "google-wavenet" && el.googleVoice) {
-      const v = (el.googleVoice.value || "").replace("Standard", "Wavenet");
+      const cur = el.googleVoice.value || "";
+      const v = cur.startsWith("cmn-TW-")
+        ? cur.replace("Standard", "Wavenet")
+        : "cmn-TW-Wavenet-A";
       el.googleVoice.value = v;
       patch.googleVoice = v;
+    } else if (q === "gemini-flash" && el.googleVoice) {
+      const cur = el.googleVoice.value || "";
+      if (!GEMINI_FEMALE.has(cur)) {
+        el.googleVoice.value = "Leda";
+        patch.googleVoice = "Leda";
+      }
     }
     saveSettings(patch);
   });
