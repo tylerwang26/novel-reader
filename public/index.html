@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>墨聲 · 小說朗讀</title>
+    <meta
+      name="description"
+      content="貼上網址，用語音或指令朗讀網路小說。優先台灣口音女聲。"
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@400;600;700&family=ZCOOL+XiaoWei&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="atmosphere" aria-hidden="true"></div>
+    <header class="site-header">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <div>
+          <p class="brand-name">墨聲</p>
+          <p class="brand-tag">小說朗讀 · 台灣口音</p>
+        </div>
+      </div>
+      <nav class="header-actions">
+        <button type="button" id="btn-chapters" class="ghost">章節</button>
+        <button type="button" id="btn-mic" class="ghost" title="語音命令">
+          語音
+        </button>
+      </nav>
+    </header>
+
+    <main>
+      <section class="hero" id="setup-panel">
+        <h1 class="hero-brand">墨聲</h1>
+        <p class="hero-line">把目錄貼進來，從任意一章開始聽。</p>
+        <p class="hero-sub">
+          預設支援《凡人修仙傳》。可說「從第 N 章開始唸」，或以文字指令操作。
+        </p>
+        <form id="toc-form" class="toc-form">
+          <label class="sr-only" for="toc-url">小說目錄網址</label>
+          <input
+            id="toc-url"
+            name="url"
+            type="url"
+            spellcheck="false"
+            value="https://big5.quanben5.com/amp/n/fanrenxiuxianchuan/xiaoshuo.html"
+            placeholder="貼上小說目錄網址"
+          />
+          <button type="submit" class="primary">載入目錄</button>
+        </form>
+        <p id="status" class="status" role="status"></p>
+      </section>
+
+      <section class="reader" id="reader" hidden>
+        <div class="reader-meta">
+          <p class="book-title" id="book-title"></p>
+          <p class="chapter-title" id="chapter-title"></p>
+        </div>
+
+        <div class="transport" aria-label="朗讀控制">
+          <button type="button" id="btn-prev" class="ghost">上一章</button>
+          <button type="button" id="btn-play" class="primary">朗讀</button>
+          <button type="button" id="btn-pause" class="ghost">暫停</button>
+          <button type="button" id="btn-next" class="ghost">下一章</button>
+          <label class="speed">
+            速度
+            <input
+              id="rate"
+              type="range"
+              min="0.7"
+              max="1.6"
+              step="0.1"
+              value="1"
+            />
+            <span id="rate-label">1.0×</span>
+          </label>
+        </div>
+
+        <form id="search-form" class="search-form">
+          <label class="sr-only" for="search-q">搜尋正文</label>
+          <input id="search-q" type="search" placeholder="搜尋本章文字…" />
+          <button type="submit" class="ghost">跳轉</button>
+          <label class="check">
+            <input type="checkbox" id="search-read" checked />
+            接著朗讀
+          </label>
+        </form>
+
+        <form id="cmd-form" class="cmd-form">
+          <label class="sr-only" for="cmd-input">文字指令</label>
+          <input
+            id="cmd-input"
+            type="text"
+            placeholder="文字指令：從第 10 章開始唸／暫停／繼續／下一章"
+            autocomplete="off"
+          />
+          <button type="submit" class="ghost">執行</button>
+        </form>
+
+        <article id="content" class="content" aria-live="polite"></article>
+      </section>
+    </main>
+
+    <aside id="drawer" class="drawer" hidden>
+      <div class="drawer-head">
+        <h2>章節列表</h2>
+        <button type="button" id="btn-close-drawer" class="ghost">關閉</button>
+      </div>
+      <ol id="chapter-list" class="chapter-list"></ol>
+    </aside>
+    <div id="drawer-backdrop" class="backdrop" hidden></div>
+
+    <footer class="site-footer">
+      <p>
+        瀏覽器 TTS 優先 <code>zh-TW</code> 女聲 · 語音辨識 Web Speech API
+        · 正文經 Worker 代理即時抽取，不寫入倉庫
+      </p>
+    </footer>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
