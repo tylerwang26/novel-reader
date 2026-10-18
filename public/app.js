@@ -523,6 +523,13 @@ async function pullSync({ code, readerId, quiet = false } = {}) {
 
 /* ---------------- audio unlock (mobile / iOS) ---------------- */
 
+function withTimeout(promise, ms, label = "timeout") {
+  return Promise.race([
+    promise,
+    new Promise((resolve) => setTimeout(() => resolve({ __timeout: label }), ms)),
+  ]);
+}
+
 async function primeHtmlAudio(audio) {
   if (!audio) return false;
   try {
@@ -535,9 +542,12 @@ async function primeHtmlAudio(audio) {
       audio.src = SILENT_MP3;
     }
     const p = audio.play();
-    if (p && p.then) await p;
-    audio.pause();
+    if (p && p.then) {
+      const r = await withTimeout(p.then(() => "ok").catch((e) => e), 600);
+      if (r && r.__timeout) console.warn("primeHtmlAudio play timeout");
+    }
     try {
+      audio.pause();
       audio.currentTime = 0;
     } catch {
       /* ignore */
@@ -551,26 +561,29 @@ async function primeHtmlAudio(audio) {
 
 async function unlockAudio() {
   try {
-    const AC = window.AudioContext || window.webkitAudioContext;
-    if (AC) {
-      state.audioCtx = state.audioCtx || new AC();
-      if (state.audioCtx.state === "suspended") {
-        await state.audioCtx.resume();
+    const work = (async () => {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (AC) {
+        state.audioCtx = state.audioCtx || new AC();
+        if (state.audioCtx.state === "suspended") {
+          await withTimeout(state.audioCtx.resume(), 600, "resume");
+        }
+        const buf = state.audioCtx.createBuffer(1, 1, 22050);
+        const src = state.audioCtx.createBufferSource();
+        src.buffer = buf;
+        src.connect(state.audioCtx.destination);
+        src.start(0);
       }
-      // short silent buffer keeps context hot on iOS
-      const buf = state.audioCtx.createBuffer(1, 1, 22050);
-      const src = state.audioCtx.createBufferSource();
-      src.buffer = buf;
-      src.connect(state.audioCtx.destination);
-      src.start(0);
-    }
-    // Prime BOTH unlock helper and the real TTS element (critical on iOS)
-    await primeHtmlAudio(el.unlockAudio);
-    await primeHtmlAudio(el.ttsAudio);
+      await primeHtmlAudio(el.unlockAudio);
+      await primeHtmlAudio(el.ttsAudio);
+      return true;
+    })();
+    await withTimeout(work, 1200, "unlock");
     state.audioUnlocked = true;
     return true;
   } catch (err) {
     console.warn("unlockAudio", err);
+    state.audioUnlocked = true; // don't block cloud fetch
     return false;
   }
 }
