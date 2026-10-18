@@ -699,7 +699,12 @@ async function speakFrom(index = 0) {
 async function jumpToParagraph(index) {
   const max = Math.max(0, (state.paragraphs?.length || 1) - 1);
   const i = Math.min(Math.max(0, Number(index) || 0), max);
+  // Update cursor + progress immediately (before audio unlock, which can stall on some devices)
+  state.speakFrom = i;
+  markParagraphCursor(i);
+  el.content?.children[i]?.scrollIntoView({ behavior: "smooth", block: "center" });
   setStatus(`從第 ${i + 1} 段開始朗讀…`);
+  await saveProgress({ paragraphIndex: i });
   await speakFrom(i);
 }
 
@@ -1402,6 +1407,7 @@ async function jumpToSearch(q, thenRead) {
   }
   el.content.querySelectorAll("p.hit").forEach((p) => p.classList.remove("hit"));
   el.content.children[idx]?.classList.add("hit");
+  markParagraphCursor(idx);
   el.content.children[idx]?.scrollIntoView({ behavior: "smooth", block: "center" });
   state.speakFrom = idx;
   await saveProgress({ paragraphIndex: idx });
@@ -1531,20 +1537,22 @@ function bindUi() {
   document.addEventListener("touchstart", unlockOnce, { passive: true });
 
   // Click / keyboard: jump to paragraph and read from there
-  el.content?.addEventListener("click", async (e) => {
+  el.content?.addEventListener("click", (e) => {
     const p = e.target?.closest?.("p[data-index]");
     if (!p || !el.content.contains(p)) return;
     e.preventDefault();
-    await unlockAudio();
-    await jumpToParagraph(Number(p.dataset.index));
+    jumpToParagraph(Number(p.dataset.index)).catch((err) =>
+      setStatus(`無法從此段朗讀：${err.message || err}`),
+    );
   });
-  el.content?.addEventListener("keydown", async (e) => {
+  el.content?.addEventListener("keydown", (e) => {
     if (e.key !== "Enter" && e.key !== " ") return;
     const p = e.target?.closest?.("p[data-index]");
     if (!p || !el.content.contains(p)) return;
     e.preventDefault();
-    await unlockAudio();
-    await jumpToParagraph(Number(p.dataset.index));
+    jumpToParagraph(Number(p.dataset.index)).catch((err) =>
+      setStatus(`無法從此段朗讀：${err.message || err}`),
+    );
   });
 
   el.tocForm.addEventListener("submit", async (e) => {
