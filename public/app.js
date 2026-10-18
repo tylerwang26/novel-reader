@@ -812,6 +812,91 @@ function markParagraphCursor(index) {
   });
 }
 
+/** Mirror of worker boilerplate filter — skip site chrome while reading. */
+function isBoilerplateParagraph(raw) {
+  const s = String(raw || "")
+    .replace(/\u00a0/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!s) return true;
+  const compact = s.replace(/\s+/g, "");
+  if (
+    /^(上一[頁页章]|下一[頁页章]|目錄|目录|返回|回目錄|回目录|加入書架|加入书架|首頁|首页)$/i.test(
+      compact,
+    )
+  ) {
+    return true;
+  }
+  if (
+    /©|&copy;|版權所有|版权所有|All\s*Rights\s*Reserved/i.test(s) &&
+    s.length < 120
+  ) {
+    return true;
+  }
+  if (
+    /全本小說網|全本小说网|完本小說|完本小说|小說閱讀網|小说阅读网/i.test(s) &&
+    s.length < 40
+  ) {
+    return true;
+  }
+  if (
+    s.length < 80 &&
+    /(www\.[a-z0-9.-]+\.[a-z]{2,}|https?:\/\/[^\s]+)/i.test(s) &&
+    !/[\u4e00-\u9fff]{12,}/.test(s)
+  ) {
+    return true;
+  }
+  if (
+    /^[是由來源来源转自轉自提供\]】【\[:：]{0,10}[a-z0-9.-]+\.(com|net|org|cc|co|xyz|info)\/?$/i.test(
+      compact,
+    )
+  ) {
+    return true;
+  }
+  if (
+    s.length < 36 &&
+    /\.(com|net|org|cc)\b/i.test(s) &&
+    !/[\u4e00-\u9fff]{8,}/.test(s)
+  ) {
+    return true;
+  }
+  if (
+    s.length < 24 &&
+    /上一[頁页]|下一[頁页]|目錄|目录|返回|書架|书架/.test(s)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function filterNovelParagraphs(list) {
+  const out = (list || []).filter((p) => !isBoilerplateParagraph(p));
+  while (out.length && isBoilerplateParagraph(out[out.length - 1])) out.pop();
+  return out;
+}
+
+function nextReadableIndex(from) {
+  let i = Math.max(0, from | 0);
+  while (i < state.paragraphs.length && isBoilerplateParagraph(state.paragraphs[i])) {
+    i += 1;
+  }
+  return i;
+}
+
+async function finishChapterAndMaybeNext() {
+  state.speaking = false;
+  updateToggleLabel();
+  await saveProgress({ paragraphIndex: 0 });
+  setStatus("本章朗讀完畢");
+  if (state.chapterIndex < (state.book?.chapters.length || 0) - 1) {
+    setStatus("本章朗讀完畢，載入下一章…");
+    await loadChapter(state.chapterIndex + 1, {
+      autoplay: true,
+      paragraphIndex: 0,
+    });
+  }
+}
+
 function mountParagraphs(paragraphs) {
   if (!el.content) return;
   el.content.innerHTML = "";
@@ -826,6 +911,10 @@ function mountParagraphs(paragraphs) {
       `第 ${i + 1} 段，點擊從此處開始朗讀`,
     );
     node.title = "點擊從此段開始朗讀";
+    if (isBoilerplateParagraph(text)) {
+      node.hidden = true;
+      node.dataset.boilerplate = "1";
+    }
     el.content.appendChild(node);
   });
   if (state.speakFrom != null) markParagraphCursor(state.speakFrom);
@@ -834,23 +923,20 @@ function mountParagraphs(paragraphs) {
 async function speakNext() {
   if (!state.speaking || state.paused) return;
   const token = state.ttsToken;
+  // Skip trailing / inline site chrome; if nothing left → next chapter
+  state.speakFrom = nextReadableIndex(state.speakFrom);
   if (state.speakFrom >= state.paragraphs.length) {
-    state.speaking = false;
-    updateToggleLabel();
-    await saveProgress({ paragraphIndex: 0 });
-    setStatus("本章朗讀完畢");
-    if (state.chapterIndex < (state.book?.chapters.length || 0) - 1) {
-      setStatus("本章朗讀完畢，載入下一章…");
-      await loadChapter(state.chapterIndex + 1, {
-        autoplay: true,
-        paragraphIndex: 0,
-      });
-    }
+    await finishChapterAndMaybeNext();
     return;
   }
 
   const i = state.speakFrom;
   const text = state.paragraphs[i];
+  if (isBoilerplateParagraph(text)) {
+    state.speakFrom = i + 1;
+    await speakNext();
+    return;
+  }
   clearSpeakingClass();
   const node = el.content.children[i];
   if (node) {
@@ -901,7 +987,7 @@ async function speakNext() {
   }
 
   if (token !== state.ttsToken || !state.speaking || state.paused) return;
-  state.speakFrom = i + 1;
+  state.speakFrom = nextReadableIndex(i + 1);
   await saveProgress({ paragraphIndex: state.speakFrom });
   await speakNext();
 }
@@ -1489,9 +1575,11 @@ async function loadChapter(
   const data = await api(`/api/chapter?url=${encodeURIComponent(ch.url)}`);
   state.chapterIndex = index;
   state.chapter = data;
-  state.paragraphs = data.paragraphs || [];
+  state.paragraphs = filterNovelParagraphs(data.paragraphs || []);
   const maxPara = Math.max(0, state.paragraphs.length - 1);
   state.speakFrom = Math.min(Math.max(0, paragraphIndex), maxPara);
+  state.speakFrom = nextReadableIndex(state.speakFrom);
+  if (state.speakFrom > maxPara) state.speakFrom = 0;
   el.chapterTitle.textContent = data.title || ch.title;
   mountParagraphs(state.paragraphs);
   renderChapterList();

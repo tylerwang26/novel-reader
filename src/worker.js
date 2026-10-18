@@ -594,6 +594,92 @@ async function handleChapter(url) {
   });
 }
 
+/**
+ * Site chrome / nav / copyright — not novel body.
+ * Keep conservative: only drop short or clearly non-prose lines.
+ */
+function isBoilerplateParagraph(raw) {
+  const s = String(raw || "")
+    .replace(/\u00a0/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!s) return true;
+  const compact = s.replace(/\s+/g, "");
+
+  // Pure navigation labels
+  if (
+    /^(上一[頁页章]|下一[頁页章]|目錄|目录|返回|回目錄|回目录|加入書架|加入书架|首頁|首页|書簽|书签)$/i.test(
+      compact,
+    )
+  ) {
+    return true;
+  }
+
+  // Copyright / site footer
+  if (
+    /©|&copy;|版權所有|版权所有|All\s*Rights\s*Reserved/i.test(s) &&
+    s.length < 120
+  ) {
+    return true;
+  }
+  if (
+    /全本小說網|全本小说网|完本小說|完本小说|小說閱讀網|小说阅读网/i.test(s) &&
+    s.length < 40
+  ) {
+    return true;
+  }
+
+  // Attribution + domain junk: 「是 由】www.wcxiaoshuo.com」
+  if (
+    s.length < 80 &&
+    /(www\.[a-z0-9.-]+\.[a-z]{2,}|https?:\/\/[^\s]+)/i.test(s) &&
+    !/[\u4e00-\u9fff]{12,}/.test(s)
+  ) {
+    return true;
+  }
+
+  // Domain-only / near-domain lines
+  if (
+    /^[是由來源来源转自轉自提供\]】【\[:：]{0,10}[a-z0-9.-]+\.(com|net|org|cc|co|xyz|info)\/?$/i.test(
+      compact,
+    )
+  ) {
+    return true;
+  }
+  if (
+    s.length < 36 &&
+    /\.(com|net|org|cc)\b/i.test(s) &&
+    !/[\u4e00-\u9fff]{8,}/.test(s)
+  ) {
+    return true;
+  }
+
+  // Short chrome leftovers
+  if (
+    s.length < 24 &&
+    /上一[頁页]|下一[頁页]|目錄|目录|返回|書架|书架/.test(s)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function filterNovelParagraphs(list) {
+  const out = [];
+  for (const p of list) {
+    if (!isBoilerplateParagraph(p)) out.push(p);
+  }
+  // Strip any trailing junk that slipped through as short lines
+  while (out.length && isBoilerplateParagraph(out[out.length - 1])) {
+    out.pop();
+  }
+  // Also peel a trailing run of chrome at end (safety)
+  let end = out.length;
+  while (end > 0 && isBoilerplateParagraph(out[end - 1])) end -= 1;
+  return out.slice(0, end);
+}
+
 function extractParagraphs(html) {
   let block =
     matchOne(html, /<div class="wrapper">(.*?)<div class="footer/i) ||
@@ -613,7 +699,7 @@ function extractParagraphs(html) {
   while ((m = re.exec(block))) {
     let t = decodeHtml(stripTags(m[1])).replace(/\s+/g, " ").trim();
     if (!t) continue;
-    if (/上一章|下一章|目錄|返回|加入書架/.test(t) && t.length < 20) continue;
+    if (isBoilerplateParagraph(t)) continue;
     ps.push(t);
   }
 
@@ -622,10 +708,10 @@ function extractParagraphs(html) {
       .replace(/\r/g, "")
       .split(/\n+/)
       .map((s) => s.trim())
-      .filter((s) => s.length > 8);
-    return plain.slice(0, 200);
+      .filter((s) => s.length > 8 && !isBoilerplateParagraph(s));
+    return filterNovelParagraphs(plain.slice(0, 200));
   }
-  return ps;
+  return filterNovelParagraphs(ps);
 }
 
 function findNav(html, base, labelRe) {
